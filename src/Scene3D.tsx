@@ -1,8 +1,9 @@
+import Panel from "./Panel";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { HEIGHT_SOURCES } from "./MapView";
-import { PixelPass } from "./pixel";
+import { PixelPass, type PixelOpts } from "./pixel";
 import { Traffic } from "./traffic";
 
 const DATA = `${import.meta.env.BASE_URL}data/scene/`;
@@ -42,7 +43,9 @@ export default function Scene3D() {
   const roofMat = useRef<THREE.MeshStandardMaterial>();
   const roofTex = useRef<THREE.Texture>();
   // modo pixel e tráfego: lidos a cada quadro pelo loop de animação
-  const [fx, setFx] = useState({ pixel: false, px: 4, levels: 6, outline: true });
+  const [fx, setFx] = useState<PixelOpts & { pixel: boolean; iso: boolean }>({
+    pixel: false, iso: false, px: 3, levels: 6, outline: true, mode: "palette", saturation: 1.35, dither: true,
+  });
   const [tr, setTr] = useState({ on: true, density: 4, paused: false, peds: false });
   const fxRef = useRef(fx);
   fxRef.current = fx;
@@ -64,6 +67,15 @@ export default function Scene3D() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#cfe3f3");
     const camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.5, 3000);
+    // câmera isométrica (ortográfica) para o modo pixel
+    const ocam = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 3000);
+    const fitOrtho = () => {
+      const a = el.clientWidth / el.clientHeight, h = 70;
+      Object.assign(ocam, { left: -h * a, right: h * a, top: h, bottom: -h });
+      ocam.updateProjectionMatrix();
+    };
+    fitOrtho();
+    let active: THREE.PerspectiveCamera | THREE.OrthographicCamera = camera;
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.maxPolarAngle = Math.PI * 0.49;
@@ -280,7 +292,7 @@ export default function Scene3D() {
     const onUp = (e: PointerEvent) => {
       if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
       const r = renderer.domElement.getBoundingClientRect();
-      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), active);
       const hit = ray.intersectObjects(pickables).find((h) => h.object.visible && h.object.parent?.visible);
       if (!hit || hit.faceIndex == null) return setPicked(null);
       const v = hit.faceIndex * 3;
@@ -293,6 +305,7 @@ export default function Scene3D() {
     const onResize = () => {
       camera.aspect = el.clientWidth / el.clientHeight;
       camera.updateProjectionMatrix();
+      fitOrtho();
       renderer.setSize(el.clientWidth, el.clientHeight);
     };
     window.addEventListener("resize", onResize);
@@ -300,10 +313,31 @@ export default function Scene3D() {
     const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
       const dt = Math.min(clock.getDelta(), 0.1);
+      // alterna perspectiva <-> isométrica (azimute 45°, elevação 35,26°)
+      const wantIso = fxRef.current.iso;
+      if (wantIso !== (active === ocam)) {
+        const tgt = controls.target;
+        if (wantIso) {
+          const el2 = Math.atan(1 / Math.SQRT2), az = Math.PI / 4;
+          ocam.position.set(tgt.x + 400 * Math.cos(el2) * Math.sin(az), tgt.y + 400 * Math.sin(el2),
+            tgt.z + 400 * Math.cos(el2) * Math.cos(az));
+          ocam.zoom = 1.2;
+          ocam.updateProjectionMatrix();
+          active = ocam;
+          controls.minPolarAngle = controls.maxPolarAngle = Math.PI / 2 - el2;
+        } else {
+          active = camera;
+          controls.minPolarAngle = 0;
+          controls.maxPolarAngle = Math.PI * 0.49;
+        }
+        controls.object = active;
+      }
       controls.update();
       // não deixa a câmera atravessar o terreno; alvo acompanha o chão ao mover
-      const gc = groundAt(camera.position.x, camera.position.z) + 1.6;
-      if (camera.position.y < gc) camera.position.y = gc;
+      if (active === camera) {
+        const gc = groundAt(camera.position.x, camera.position.z) + 1.6;
+        if (camera.position.y < gc) camera.position.y = gc;
+      }
       const gt = groundAt(controls.target.x, controls.target.z);
       if (Math.abs(controls.target.y - (gt + 2)) > 0.01) controls.target.y += (gt + 2 - controls.target.y) * 0.2;
       const t = traffic.current;
@@ -312,8 +346,8 @@ export default function Scene3D() {
         if (trRef.current.on && !trRef.current.paused) t.update(dt);
       }
       const f = fxRef.current;
-      if (f.pixel) pixel.render(renderer, scene, camera, f);
-      else renderer.render(scene, camera);
+      if (f.pixel) pixel.render(renderer, scene, active, f);
+      else renderer.render(scene, active);
     });
 
     return () => {
@@ -369,8 +403,7 @@ export default function Scene3D() {
   return (
     <>
       <div id="map" ref={ref} />
-      <div className="panel">
-        <h1>Rua 3D · cena</h1>
+      <Panel title="Rua 3D · cena">
         <small>
           Terreno e textura do LiDAR 2017 (0,5 m; cor do ponto mais alto). Telhados de duas águas entre beiral (p20) e
           cumeeira (p90). Arraste para girar, botão direito para mover, roda para zoom. Clique num prédio.
@@ -401,15 +434,39 @@ export default function Scene3D() {
             <input type="checkbox" checked={fx.pixel} onChange={(e) => setFx({ ...fx, pixel: e.target.checked })} />
             Ligado
           </label>
+          <label className="row">
+            <input type="checkbox" checked={fx.iso} onChange={(e) => setFx({ ...fx, iso: e.target.checked })} />
+            Vista isométrica
+          </label>
           <label className="row slider">
             Pixel {fx.px}px
-            <input type="range" min={2} max={12} value={fx.px} disabled={!fx.pixel}
+            <input type="range" min={1} max={10} value={fx.px} disabled={!fx.pixel}
               onChange={(e) => setFx({ ...fx, px: +e.target.value })} />
           </label>
           <label className="row slider">
-            Cores/canal {fx.levels}
-            <input type="range" min={2} max={12} value={fx.levels} disabled={!fx.pixel}
-              onChange={(e) => setFx({ ...fx, levels: +e.target.value })} />
+            Cores
+            <select value={fx.mode} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, mode: e.target.value as PixelOpts["mode"] })}>
+              <option value="palette">Paleta cidade</option>
+              <option value="channels">Por canal</option>
+            </select>
+          </label>
+          {fx.mode === "channels" && (
+            <label className="row slider">
+              Níveis {fx.levels}
+              <input type="range" min={2} max={12} value={fx.levels} disabled={!fx.pixel}
+                onChange={(e) => setFx({ ...fx, levels: +e.target.value })} />
+            </label>
+          )}
+          <label className="row slider">
+            Saturação {fx.saturation.toFixed(2)}
+            <input type="range" min={0.8} max={2} step={0.05} value={fx.saturation} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, saturation: +e.target.value })} />
+          </label>
+          <label className="row">
+            <input type="checkbox" checked={fx.dither} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, dither: e.target.checked })} />
+            Pontilhado
           </label>
           <label className="row">
             <input type="checkbox" checked={fx.outline} disabled={!fx.pixel}
@@ -453,7 +510,7 @@ export default function Scene3D() {
             </table>
           </div>
         )}
-      </div>
+      </Panel>
     </>
   );
 }

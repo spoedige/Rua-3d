@@ -27,3 +27,15 @@ html, body, #root { margin: 0; height: 100%; font-family: system-ui, sans-serif;
 .group summary { font-weight: 600; cursor: pointer; }
 .slider { justify-content: space-between; }
 .slider input { width: 110px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.panel-head h1 { margin: 0; }
+.panel-btn {
+  border: 0; background: #edf2f7; border-radius: 6px; width: 30px; height: 30px;
+  font-size: 18px; line-height: 1; cursor: pointer; flex: none;
+}
+.panel.collapsed { right: auto; width: auto; }
+.panel > div[hidden] { display: none; }
+@media (max-width: 600px) {
+  .panel { max-height: 55vh; }
+  .panel.collapsed { left: 8px; right: auto; bottom: 28px; }
+}

@@ -18,7 +18,7 @@ scripts/fetch_data.py   gera os dados
 scripts/plot_check.py   PNG de conferência em docs/conferencia.png
 scripts/build_scene.py  assets da cena 3D em public/data/scene/ (MDT, textura, prédios, linhas)
 public/data/            area.geojson, streets.geojson, buildings.geojson, terrain.json
-src/                    App.tsx (rotas #/ e #/3d), MapView.tsx (etapa 2), Scene3D.tsx (etapas 3a-3c), pixel.ts, traffic.ts
+src/                    App.tsx (rotas #/ e #/3d), MapView.tsx (etapa 2), Scene3D.tsx (etapas 3a-3e), Panel.tsx, pixel.ts, traffic.ts
 ```
 
 ## Fontes de dados
@@ -39,6 +39,7 @@ src/                    App.tsx (rotas #/ e #/3d), MapView.tsx (etapa 2), Scene3
 3a. (feito) Cena three.js em `#/3d`; `python scripts/build_scene.py` gera os assets. Escopo: terreno LiDAR 0,5 m (MDT, classe 2) recortado na bbox; prédios com telhado de duas águas (beiral `height_eave`, cumeeira `height_ridge`) e fachadas neutras; ortofoto GeoSampa no chão e no topo dos telhados (fallback: cor RGB dos pontos LiDAR `MDS_color`); câmera orbital. Peso dos assets publicados < 15 MB
 3b. (feito) Camadas de árvores, calçadas e nuvem (`points.bin`, 3,7 MB, carregada sob demanda); assets da cena 4,9 MB. Escopo: Árvores (classe 5) e calçadas/meio-fio do LiDAR; nuvem colorida como camada opcional; troca de ids por id estável derivado do centroide (fonte + E/N UTM arredondados), migrando `EXCLUDE_IDS` e `heights_manual.csv`
 3c. (feito) Modo pixel (render em baixa resolução + nearest, cores por canal, contorno por profundidade; `src/pixel.ts`) e tráfego animado (`src/traffic.ts`, `traffic.json`): carros nas faixas deslocadas meia largura do eixo, mão à direita, mão única quando `oneway`; densidade, pausa e pedestres opcionais nas calçadas. Leito estimado pela distância do eixo à quadra viária (5-6,3 m). Fachadas: Mapillary pendente (API exige token; licença das imagens CC BY-SA 4.0). Street View do Google não pode ser usado como textura (termos de uso)
+3e. (feito) Painel recolhível (`src/Panel.tsx`; no celular abre recolhido). Modo pixel com vista isométrica (câmera ortográfica, azimute 45°, elevação 35,26°), paleta própria de cidade (`CITY_PALETTE` em `src/pixel.ts`), saturação e pontilhado ordenado; modo antigo por canal mantido
 3d. (feito) Fachadas procedurais a partir de `public/data/fachadas.csv` (gerado pelo build_scene.py; regerar não apaga o que foi preenchido). Prédio sem anotação fica neutro. Nenhuma imagem do Street View entra como dado: só anotações feitas por observação
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
 

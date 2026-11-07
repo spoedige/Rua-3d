@@ -1,3 +1,4 @@
+import Panel from "./Panel";
 import { useEffect, useRef } from "react";
 import maplibregl, { type MapGeoJSONFeature } from "maplibre-gl";
 
@@ -119,8 +120,7 @@ export default function MapView() {
   return (
     <>
       <div id="map" ref={ref} />
-      <div className="panel">
-        <h1>Rua 3D · existente</h1>
+      <Panel title="Rua 3D · existente">
         <small>Prédios extrudados pela cumeeira (p90 de MDS − MDT). Clique num prédio para ver as alturas.</small>
         <div style={{ marginTop: 8 }}>
           {HEIGHT_SOURCES.map(([k, c, label]) => (
@@ -138,7 +138,7 @@ export default function MapView() {
             Vias (OSM)
           </div>
         </div>
-      </div>
+      </Panel>
     </>
   );
 }
