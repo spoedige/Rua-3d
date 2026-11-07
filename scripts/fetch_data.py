@@ -20,6 +20,8 @@ from pyproj import Transformer
 from shapely.geometry import LineString, Point, mapping, shape
 from shapely.ops import transform
 
+GEOSAMPA_WFS = "https://wms.geosampa.prefeitura.sp.gov.br/geoserver/ows"
+LIDAR_LAZ = "https://laz-m3dc-pmsp.s3.sa-east-1.amazonaws.com/MDS_color_{q}.laz"
 OFM_TILEJSON = "https://tiles.openfreemap.org/planet"
 MS_LINKS = "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv"
 TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
@@ -147,6 +149,80 @@ def ms_buildings(lat, lon, area):
     return out
 
 
+# ---------- GeoSampa ----------
+def geosampa_wfs(layer, bbox):
+    s, w, n, e = bbox
+    r = requests.get(GEOSAMPA_WFS, headers=UA, timeout=120, params={
+        "service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeNames": f"geoportal:{layer}",
+        "outputFormat": "application/json", "srsName": "EPSG:4326", "bbox": f"{w},{s},{e},{n},EPSG:4326"})
+    r.raise_for_status()
+    return r.json()["features"]
+
+
+def lidar_points(bbox, area_utm, cache, pad=40.0):
+    """Pontos LiDAR 2017 (LAZ por folha, AWS Open Data) num retângulo UTM em volta da faixa."""
+    import laspy
+    x0, y0, x1, y1 = area_utm.buffer(pad).bounds
+    cache.mkdir(parents=True, exist_ok=True)
+    X, Y, Z, C = [], [], [], []
+    for f in geosampa_wfs("quadricula_folha_mds", bbox):
+        q = f["properties"]["cd_quadricula"]
+        path = cache / f"MDS_color_{q}.laz"
+        if not path.exists():
+            print(f"baixando LiDAR {q}...")
+            r = requests.get(LIDAR_LAZ.format(q=q), headers=UA, timeout=600)
+            r.raise_for_status()
+            path.write_bytes(r.content)
+        las = laspy.read(path)
+        x, y = np.asarray(las.x), np.asarray(las.y)
+        m = (x > x0) & (x < x1) & (y > y0) & (y < y1)
+        X.append(x[m]); Y.append(y[m]); Z.append(np.asarray(las.z)[m]); C.append(np.asarray(las.classification)[m])
+    return (x0, y0, x1, y1), *map(np.concatenate, (X, Y, Z, C))
+
+
+def ndsm(extent, X, Y, Z, C, res=0.5):
+    """MDS (Z máximo por célula, sem ruído) menos MDT (solo, classe 2, interpolado)."""
+    from scipy.interpolate import griddata
+    x0, y0, x1, y1 = extent
+    nx, ny = int((x1 - x0) / res), int((y1 - y0) / res)
+    keep = ~np.isin(C, (7, 18))
+    ix = ((X[keep] - x0) / res).astype(int).clip(0, nx - 1)
+    iy = ((Y[keep] - y0) / res).astype(int).clip(0, ny - 1)
+    mds = np.full((ny, nx), -np.inf)
+    np.maximum.at(mds, (iy, ix), Z[keep])
+    gx, gy = np.meshgrid(x0 + (np.arange(nx) + 0.5) * res, y0 + (np.arange(ny) + 0.5) * res)
+    g = C == 2
+    pts = np.c_[X[g], Y[g]]
+    mdt = griddata(pts, Z[g], (gx, gy), method="linear")
+    hole = np.isnan(mdt)
+    mdt[hole] = griddata(pts, Z[g], (gx[hole], gy[hole]), method="nearest")
+    diff = np.where(np.isfinite(mds), mds - mdt, np.nan)
+    return gx, gy, diff
+
+
+def lidar_height(g_utm, gx, gy, diff, min_cells=8):
+    import shapely
+    m = shapely.contains_xy(g_utm, gx, gy) & np.isfinite(diff)
+    if m.sum() < min_cells:
+        return None
+    return float(np.median(diff[m]))
+
+
+def manual_heights(path):
+    import csv
+    if not path.exists():
+        return {}
+    res = {}
+    for row in csv.DictReader(path.open(encoding="utf-8")):
+        alt = num(row.get("altura_m"))
+        pav = num(row.get("pavimentos"))
+        if alt:
+            res[str(row["id"])] = alt
+        elif pav:
+            res[str(row["id"])] = pav * 3.0
+    return res
+
+
 # ---------- terreno ----------
 def lonlat_to_px(lon, lat, z):
     n = 256 * 2**z
@@ -208,6 +284,9 @@ def main():
                     metavar=("S", "W", "N", "E"), help="bbox de download (SO/NE)")
     ap.add_argument("--res", type=float, default=5.0, help="resolução do terreno em metros")
     ap.add_argument("--out", default="public/data")
+    ap.add_argument("--cache", default="data_cache/lidar", help="pasta dos LAZ baixados")
+    ap.add_argument("--manual", default="public/data/heights_manual.csv",
+                    help="CSV id,pavimentos,altura_m com prioridade sobre as demais fontes")
     a = ap.parse_args()
 
     out = Path(a.out)
@@ -240,35 +319,59 @@ def main():
             "name": name, "width": None, "lanes": None, "oneway": p.get("oneway")}})
     (out / "streets.geojson").write_text(json.dumps(fc(streets)))
 
-    buildings, osm_geoms = [], []
+    # footprints: GeoSampa (aerofotogrametria) > OSM > Microsoft, sem sobreposição > 30%
+    cands = []  # (id, source, geom, props, altura_fallback)
+    for f in geosampa_wfs("edificacao", bbox):
+        g = shape(f["geometry"])
+        if g.intersects(area):
+            p = f["properties"]
+            cands.append((f"gs/{p['cd_identificador']}", "geosampa", g,
+                          {"escala": p.get("tx_escala")}, (p.get("qt_altura_edificacao"), "geosampa_aero")))
     for fid, p, g in merge_by_id(L["building"]):
-        if g.geom_type not in ("Polygon", "MultiPolygon") or not g.intersects(area):
-            continue
-        h, src = height_of(p.get("render_height"))
-        osm_geoms.append(g)
-        buildings.append({"type": "Feature", "geometry": r6(g), "properties": {
-            "source": "osm", "osm_id": fid, "height": round(h, 2), "height_source": src,
-            "min_height": p.get("render_min_height", 0)}})
+        if g.geom_type in ("Polygon", "MultiPolygon") and g.intersects(area):
+            h, src = height_of(p.get("render_height"))
+            cands.append((f"osm/{fid}", "osm", g, {}, (h if src != "default" else None, src)))
+    for i, (g, h) in enumerate(ms_buildings(area.centroid.y, area.centroid.x, area)):
+        cands.append((f"ms/{i}", "microsoft", g, {}, (h, "ms_estimate")))
 
-    lat_c, lon_c = area.centroid.y, area.centroid.x
-    for g, h in ms_buildings(lat_c, lon_c, area):
-        overlap = sum(g.intersection(o).area for o in osm_geoms if g.intersects(o))
-        if overlap > 0.3 * g.area:
+    from shapely.ops import unary_union
+    kept, covered = [], None
+    for c in cands:
+        gu = transform(to_utm, c[2])
+        if covered is not None and gu.intersection(covered).area > 0.3 * gu.area:
             continue
+        kept.append((*c, gu))
+        covered = gu if covered is None else unary_union([covered, gu])
+
+    extent, X, Y, Z, C = lidar_points(bbox, area_utm, Path(a.cache))
+    gx, gy, diff = ndsm(extent, X, Y, Z, C)
+    manual = manual_heights(Path(a.manual))
+
+    buildings = []
+    for bid, source, g, props, (hfb, srcfb), gu in kept:
+        if bid in manual:
+            h, src = manual[bid], "manual"
+        else:
+            h = lidar_height(gu, gx, gy, diff)
+            src = "lidar_2017"
+            if h is None or h < 2.0:
+                h, src = (hfb, srcfb) if hfb and hfb > 0 else (6.0, "default")
         buildings.append({"type": "Feature", "geometry": r6(g), "properties": {
-            "source": "microsoft", "height": round(h, 2) if h else 6.0,
-            "height_source": "ms_estimate" if h else "default"}})
+            "id": bid, "source": source, "height": round(h, 2), "height_source": src, **props}})
     (out / "buildings.geojson").write_text(json.dumps(fc(buildings)))
 
     t = terrain(bbox, res=a.res)
     (out / "terrain.json").write_text(json.dumps(t))
 
     srcs = [b["properties"]["height_source"] for b in buildings]
-    real = sum(s == "osm_tiles" for s in srcs)
+    real = sum(s in ("lidar_2017", "manual", "osm_tiles") for s in srcs)
     print(f"vias: {len(streets)}")
-    print(f"edificações: {len(buildings)} (osm {len(osm_geoms)}, microsoft {len(buildings) - len(osm_geoms)})")
+    fontes = [b["properties"]["source"] for b in buildings]
+    print(f"edificações: {len(buildings)} { {k: fontes.count(k) for k in sorted(set(fontes))} }")
+    hs = sorted(b["properties"]["height"] for b in buildings)
+    print(f"alturas: min {hs[0]} / mediana {hs[len(hs) // 2]} / max {hs[-1]} m")
     print(f"altura por fonte: { {k: srcs.count(k) for k in sorted(set(srcs))} }")
-    print(f"% com altura real (OSM): {100 * real / max(len(buildings), 1):.1f}%")
+    print(f"% com altura medida (LiDAR/manual/OSM): {100 * real / max(len(buildings), 1):.1f}%")
     print(f"terreno: {t['width']}x{t['height']} @ {a.res} m, elevação {t['min']} a {t['max']} m")
 
 
