@@ -17,7 +17,7 @@ Modelo 3D de um trecho de rua em São Paulo/SP para estudar uma intervenção ar
 scripts/fetch_data.py   gera os dados
 scripts/plot_check.py   PNG de conferência em docs/conferencia.png
 public/data/            area.geojson, streets.geojson, buildings.geojson, terrain.json
-src/                    app (etapas 2 a 4)
+src/                    app React (etapa 2: App.tsx, mapa MapLibre)
 ```
 
 ## Fontes de dados
@@ -29,6 +29,6 @@ src/                    app (etapas 2 a 4)
 
 ## Etapas
 1. Dados: `pip install shapely pyproj numpy pillow requests mapbox-vector-tile 'laspy[lazrs]' scipy matplotlib && python scripts/fetch_data.py && python scripts/plot_check.py`
-2. Mapa MapLibre com os dados e a faixa destacada
+2. Mapa MapLibre com os dados e a faixa destacada (feito). `npm i && npm run dev`; deploy: `npm run build` e publicar `dist/` na branch `gh-pages` (https://spoedige.github.io/rua-3d/)
 3. Cena three.js com terreno, vias e prédios extrudados, câmera orbital
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
