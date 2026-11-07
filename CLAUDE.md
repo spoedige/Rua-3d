@@ -32,7 +32,7 @@ src/                    App.tsx (rotas #/ e #/3d), MapView.tsx (etapa 2), Scene3
 
 ## Etapas
 1. Dados: `pip install shapely pyproj numpy pillow requests mapbox-vector-tile 'laspy[lazrs]' scipy matplotlib && python scripts/fetch_data.py && python scripts/plot_check.py && python scripts/build_scene.py`
-2. Mapa MapLibre com os dados e a faixa destacada (feito). `npm i && npm run dev`; deploy: `npm run build` e publicar `dist/` na branch `gh-pages` (https://spoedige.github.io/rua-3d/)
+2. Mapa MapLibre com os dados e a faixa destacada (feito). `npm i && npm run dev`; deploy: `npm run build` e publicar `dist/` na branch `gh-pages` (https://spoedige.github.io/Rua-3d/ (maiúscula; o caminho diferencia))
 3a. (feito) Cena three.js em `#/3d`; `python scripts/build_scene.py` gera os assets (0,7 MB). Escopo: terreno LiDAR 0,5 m (MDT, classe 2) recortado na bbox; prédios com telhado de duas águas (beiral `height_eave`, cumeeira `height_ridge`) e fachadas neutras; ortofoto GeoSampa no chão e no topo dos telhados (fallback: cor RGB dos pontos LiDAR `MDS_color`); câmera orbital. Peso dos assets publicados < 15 MB
 3b. Árvores (classe 5) e calçadas/meio-fio do LiDAR; nuvem colorida como camada opcional; troca de ids por id estável derivado do centroide (fonte + E/N UTM arredondados), migrando `EXCLUDE_IDS` e `heights_manual.csv`
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
