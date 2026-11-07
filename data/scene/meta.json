@@ -1,0 +1,24 @@
+{
+ "crs": "EPSG:31983",
+ "origin_utm": [
+  333394,
+  7385187
+ ],
+ "size": [
+  128,
+  213
+ ],
+ "dtm": {
+  "res": 0.5,
+  "nx": 257,
+  "ny": 427,
+  "min": 770.85,
+  "max": 783.15
+ },
+ "ortho": {
+  "file": "ortho.jpg",
+  "res": 0.25,
+  "source": "lidar_2017_rgb",
+  "note": "cor do ponto LiDAR mais alto por c\u00e9lula; ortofoto GeoSampa sem download direto"
+ }
+}
