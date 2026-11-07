@@ -205,7 +205,8 @@ def lidar_height(g_utm, gx, gy, diff, min_cells=8):
     m = shapely.contains_xy(g_utm, gx, gy) & np.isfinite(diff)
     if m.sum() < min_cells:
         return None
-    return float(np.median(diff[m]))
+    v = diff[m]
+    return float(np.median(v)), float(np.percentile(v, 20)), float(np.percentile(v, 90))
 
 
 def manual_heights(path):
@@ -349,15 +350,19 @@ def main():
 
     buildings = []
     for bid, source, g, props, (hfb, srcfb), gu in kept:
+        lid = lidar_height(gu, gx, gy, diff)
+        eave = ridge = None
+        if lid and lid[0] >= 2.0:
+            eave, ridge = round(lid[1], 2), round(lid[2], 2)
         if bid in manual:
             h, src = manual[bid], "manual"
+        elif eave is not None:
+            h, src = lid[0], "lidar_2017"
         else:
-            h = lidar_height(gu, gx, gy, diff)
-            src = "lidar_2017"
-            if h is None or h < 2.0:
-                h, src = (hfb, srcfb) if hfb and hfb > 0 else (6.0, "default")
+            h, src = (hfb, srcfb) if hfb and hfb > 0 else (6.0, "default")
         buildings.append({"type": "Feature", "geometry": r6(g), "properties": {
-            "id": bid, "source": source, "height": round(h, 2), "height_source": src, **props}})
+            "id": bid, "source": source, "height": round(h, 2), "height_eave": eave, "height_ridge": ridge,
+            "height_source": src, "area_m2": round(gu.area, 1), **props}})
     (out / "buildings.geojson").write_text(json.dumps(fc(buildings)))
 
     t = terrain(bbox, res=a.res)
