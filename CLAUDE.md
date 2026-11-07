@@ -32,4 +32,5 @@ src/                    app React (etapa 2: App.tsx, mapa MapLibre)
 1. Dados: `pip install shapely pyproj numpy pillow requests mapbox-vector-tile 'laspy[lazrs]' scipy matplotlib && python scripts/fetch_data.py && python scripts/plot_check.py`
 2. Mapa MapLibre com os dados e a faixa destacada (feito). `npm i && npm run dev`; deploy: `npm run build` e publicar `dist/` na branch `gh-pages` (https://spoedige.github.io/rua-3d/)
 3. Cena three.js com terreno, vias e prédios extrudados, câmera orbital
+   - Trocar ids `ms/N` (e demais) por id estável derivado do centroide (ex.: fonte + E/N UTM arredondados), migrando `EXCLUDE_IDS` e `heights_manual.csv`
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
