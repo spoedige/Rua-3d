@@ -10,6 +10,7 @@ import io
 import json
 import math
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,9 +20,10 @@ from pyproj import Transformer
 from shapely.geometry import LineString, Point, mapping, shape
 from shapely.ops import transform
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
+OFM_TILEJSON = "https://tiles.openfreemap.org/planet"
 MS_LINKS = "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv"
 TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 UA = {"User-Agent": "rua-3d/0.1"}
 
 to_utm = Transformer.from_crs(4326, 31983, always_xy=True).transform
@@ -44,40 +46,61 @@ def build_area(start, end, width):
     return transform(to_wgs, poly_utm), poly_utm
 
 
-# ---------- OSM ----------
-def overpass(bbox):
+# ---------- OSM via vector tiles do OpenFreeMap ----------
+def tile_xy(lat, lon, z):
+    sn = math.sin(math.radians(lat))
+    return int((lon + 180) / 360 * 2**z), int((0.5 - math.log((1 + sn) / (1 - sn)) / (4 * math.pi)) * 2**z)
+
+
+def ofm_layers(bbox, z=14, layers=("transportation", "transportation_name", "building")):
+    """Decodifica os tiles z14 que cobrem a bbox e devolve {camada: [(id, props, geom_wgs84)]}."""
+    import mapbox_vector_tile as mvt
+    from shapely.affinity import affine_transform
     s, w, n, e = bbox
-    q = f"""[out:json][timeout:60];
-(way["highway"]({s},{w},{n},{e});
- way["building"]({s},{w},{n},{e});
- relation["building"]({s},{w},{n},{e}););
-out tags geom;"""
-    r = requests.post(OVERPASS, data={"data": q}, headers=UA, timeout=120)
-    r.raise_for_status()
-    return r.json()["elements"]
+    x0, y0 = tile_xy(n, w, z)
+    x1, y1 = tile_xy(s, e, z)
+    url = requests.get(OFM_TILEJSON, headers=UA, timeout=30).json()["tiles"][0]
+    out = {k: [] for k in layers}
+    for ty in range(y0, y1 + 1):
+        for tx in range(x0, x1 + 1):
+            r = requests.get(url.format(z=z, x=tx, y=ty), headers=UA, timeout=60)
+            r.raise_for_status()
+            d = mvt.decode(r.content, default_options={"y_coord_down": True})
+            for k in layers:
+                L = d.get(k)
+                if not L:
+                    continue
+                ext = L["extent"]
+                for f in L["features"]:
+                    g = shape(f["geometry"])
+                    # coords do tile -> pixel mundial -> lon/lat
+                    g = affine_transform(g, [1 / ext, 0, 0, 1 / ext, tx, ty])
+                    g = transform(lambda X, Y, Z=None: _merc_to_lonlat(X, Y, z), g)
+                    out[k].append((f.get("id"), f["properties"], g))
+    return out
 
 
-def way_geom(el, closed):
-    coords = [(p["lon"], p["lat"]) for p in el.get("geometry", [])]
-    if closed:
-        from shapely.geometry import Polygon
-        return Polygon(coords) if len(coords) >= 4 else None
-    return LineString(coords) if len(coords) >= 2 else None
+def _merc_to_lonlat(X, Y, z):
+    X, Y = np.asarray(X, float), np.asarray(Y, float)
+    lon = X / 2**z * 360 - 180
+    lat = np.degrees(np.arctan(np.sinh(math.pi * (1 - 2 * Y / 2**z))))
+    return lon, lat
 
 
-def relation_geom(el):
-    from shapely.geometry import Polygon
-    from shapely.ops import polygonize, unary_union
-    outer = [LineString([(p["lon"], p["lat"]) for p in m["geometry"]])
-             for m in el.get("members", []) if m.get("role") == "outer" and m.get("geometry")]
-    inner = [LineString([(p["lon"], p["lat"]) for p in m["geometry"]])
-             for m in el.get("members", []) if m.get("role") == "inner" and m.get("geometry")]
-    if not outer:
-        return None
-    g = unary_union(list(polygonize(unary_union(outer))))
-    if inner:
-        g = g.difference(unary_union(list(polygonize(unary_union(inner)))))
-    return g if not g.is_empty else None
+def merge_by_id(items):
+    """Une pedaços de uma mesma feição cortada entre tiles."""
+    from shapely.ops import unary_union, linemerge
+    groups = {}
+    for fid, props, g in items:
+        key = fid if fid is not None else id(g)
+        groups.setdefault(key, (props, []))[1].append(g)
+    res = []
+    for key, (props, gs) in groups.items():
+        g = unary_union(gs)
+        if g.geom_type == "MultiLineString":
+            g = linemerge(g)
+        res.append((key, props, g))
+    return res
 
 
 def num(v):
@@ -87,14 +110,11 @@ def num(v):
     return float(m.group().replace(",", ".")) if m else None
 
 
-def height_of(tags):
-    h = num(tags.get("height"))
-    if h:
-        return h, "osm_height"
-    lv = num(tags.get("building:levels"))
-    if lv:
-        return lv * 3.0, "osm_levels"
-    return 6.0, "default"
+def height_of(render_height):
+    """render_height do OpenMapTiles = height do OSM, ou levels*3,66, ou 5 m padrão (arredondado)."""
+    if render_height is None or render_height <= 5:
+        return 6.0, "default"
+    return float(render_height), "osm_tiles"
 
 
 # ---------- Microsoft Building Footprints ----------
@@ -199,34 +219,36 @@ def main():
         "type": "Feature", "geometry": r6(area),
         "properties": {"width_m": a.width, "area_m2": round(area_utm.area, 1)}}])))
 
-    els = overpass(bbox)
+    L = ofm_layers(bbox)
+    names = [(p.get("name"), g) for _, p, g in merge_by_id(L["transportation_name"])]
+    names_utm = [(nm, transform(to_utm, g)) for nm, g in names if nm]
 
     streets = []
-    for el in els:
-        t = el.get("tags", {})
-        if el["type"] != "way" or "highway" not in t:
+    for fid, p, g in merge_by_id(L["transportation"]):
+        if not g.geom_type.endswith("LineString") or not g.intersects(area):
             continue
-        g = way_geom(el, closed=False)
-        if g is None or not g.intersects(area):
-            continue
-        streets.append({"type": "Feature", "geometry": r6(g.intersection(area)), "properties": {
-            "osm_id": el["id"], "highway": t.get("highway"), "name": t.get("name"),
-            "width": num(t.get("width")), "lanes": num(t.get("lanes"))}})
+        clip = g.intersection(area)
+        gu = transform(to_utm, clip)
+        # nome = linha de transportation_name com maior trecho a até 3 m da via
+        name, best = None, 0.0
+        for nm, gn in names_utm:
+            ov = gn.intersection(gu.buffer(3)).length
+            if ov > best:
+                best, name = ov, nm
+        streets.append({"type": "Feature", "geometry": r6(clip), "properties": {
+            "osm_id": fid, "highway": p.get("subclass") or p.get("class"), "class": p.get("class"),
+            "name": name, "width": None, "lanes": None, "oneway": p.get("oneway")}})
     (out / "streets.geojson").write_text(json.dumps(fc(streets)))
 
     buildings, osm_geoms = [], []
-    for el in els:
-        t = el.get("tags", {})
-        if "building" not in t or t.get("building") == "no":
+    for fid, p, g in merge_by_id(L["building"]):
+        if g.geom_type not in ("Polygon", "MultiPolygon") or not g.intersects(area):
             continue
-        g = way_geom(el, closed=True) if el["type"] == "way" else relation_geom(el)
-        if g is None or not g.is_valid or not g.intersects(area):
-            continue
-        h, src = height_of(t)
+        h, src = height_of(p.get("render_height"))
         osm_geoms.append(g)
         buildings.append({"type": "Feature", "geometry": r6(g), "properties": {
-            "source": "osm", "osm_id": f"{el['type']}/{el['id']}", "building": t.get("building"),
-            "height": round(h, 2), "height_source": src}})
+            "source": "osm", "osm_id": fid, "height": round(h, 2), "height_source": src,
+            "min_height": p.get("render_min_height", 0)}})
 
     lat_c, lon_c = area.centroid.y, area.centroid.x
     for g, h in ms_buildings(lat_c, lon_c, area):
@@ -242,7 +264,7 @@ def main():
     (out / "terrain.json").write_text(json.dumps(t))
 
     srcs = [b["properties"]["height_source"] for b in buildings]
-    real = sum(s in ("osm_height", "osm_levels") for s in srcs)
+    real = sum(s == "osm_tiles" for s in srcs)
     print(f"vias: {len(streets)}")
     print(f"edificações: {len(buildings)} (osm {len(osm_geoms)}, microsoft {len(buildings) - len(osm_geoms)})")
     print(f"altura por fonte: { {k: srcs.count(k) for k in sorted(set(srcs))} }")

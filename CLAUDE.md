@@ -9,7 +9,7 @@ Modelo 3D de um trecho de rua em São Paulo/SP para estudar uma intervenção ar
 
 ## Stack
 - Front: React + TypeScript + Vite, MapLibre GL (base OpenFreeMap), three.js
-- Dados: Python (shapely, pyproj, numpy, pillow, requests)
+- Dados: Python (shapely, pyproj, numpy, pillow, requests, mapbox-vector-tile)
 - Sem PMTiles: GeoJSON/JSON estáticos em `public/data/`
 
 ## Estrutura
@@ -20,13 +20,14 @@ src/                    app (etapas 2 a 4)
 ```
 
 ## Fontes de dados
-- Vias e edificações: OpenStreetMap via Overpass API
+- Vias e edificações: OSM via vector tiles do OpenFreeMap (z14, camadas transportation, transportation_name, building). Overpass não acessível do ambiente cloud
 - Edificações faltantes: Microsoft Global Building Footprints
 - Terreno: AWS Terrain Tiles (Terrarium), z15 (~4,4 m/px nesta latitude)
-- Altura: `height` > `building:levels`*3 m > 6 m padrão; origem em `height_source`
+- Altura: `render_height` dos tiles (height do OSM ou levels*3,66, arredondado; <=5 m é padrão e vira 6 m). `height_source`: osm_tiles, ms_estimate, default
+- Tiles não trazem width/lanes das vias (campos nulos)
 
 ## Etapas
-1. Dados: `pip install shapely pyproj numpy pillow requests && python scripts/fetch_data.py`
+1. Dados: `pip install shapely pyproj numpy pillow requests mapbox-vector-tile && python scripts/fetch_data.py`
 2. Mapa MapLibre com os dados e a faixa destacada
 3. Cena three.js com terreno, vias e prédios extrudados, câmera orbital
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
