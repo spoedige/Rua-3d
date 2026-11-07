@@ -28,6 +28,11 @@ TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 UA = {"User-Agent": "rua-3d/0.1"}
 
+# edificações descartadas por id (ver CLAUDE.md)
+EXCLUDE_IDS = {
+    "ms/13",  # Microsoft, 1.134 m², funde várias construções e fica quase todo fora da faixa
+}
+
 to_utm = Transformer.from_crs(4326, 31983, always_xy=True).transform
 to_wgs = Transformer.from_crs(31983, 4326, always_xy=True).transform
 
@@ -338,6 +343,9 @@ def main():
     from shapely.ops import unary_union
     kept, covered = [], None
     for c in cands:
+        if c[0] in EXCLUDE_IDS:
+            print(f"excluído: {c[0]}")
+            continue
         gu = transform(to_utm, c[2])
         if covered is not None and gu.intersection(covered).area > 0.3 * gu.area:
             continue
