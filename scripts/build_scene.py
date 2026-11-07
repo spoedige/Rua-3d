@@ -22,12 +22,13 @@ import numpy as np
 import shapely
 from PIL import Image
 from scipy.interpolate import griddata
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, gaussian_filter, maximum_filter
+from scipy.spatial import cKDTree
 from shapely.geometry import LineString, Polygon, shape
 from shapely.ops import split, transform
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fetch_data import to_utm  # noqa: E402
+from fetch_data import geosampa_wfs, to_utm  # noqa: E402
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -166,6 +167,88 @@ def building_mesh(poly, base, eave, ridge, origin):
     return walls, roofs
 
 
+def detect_trees(rect, res, dtm, X, Y, Z, C, min_h=3.0, win=3.5):
+    """Árvores a partir da classe 5: picos locais do modelo de altura da vegetação."""
+    x0, y0, _, _ = rect
+    ny, nx = dtm.shape
+    v = C == 5
+    ix = ((X[v] - x0) / res).astype(int)
+    iy = ((Y[v] - y0) / res).astype(int)
+    ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    top = np.full((ny, nx), -np.inf)
+    np.maximum.at(top, (iy[ok], ix[ok]), Z[v][ok])
+    chm = np.where(np.isfinite(top), top - dtm, 0.0).clip(0)
+    sm = gaussian_filter(chm, 1.0)
+    k = int(round(win / res)) | 1
+    peaks = np.argwhere((sm == maximum_filter(sm, size=k)) & (sm >= min_h))
+    if not len(peaks):
+        return []
+    veg = np.argwhere(chm > 2.0)
+    tree = cKDTree(peaks)
+    d, owner = tree.query(veg, distance_upper_bound=6.0 / res)
+    counts = np.bincount(owner[np.isfinite(d)], minlength=len(peaks))
+    out = []
+    for (j, i), n in zip(peaks, counts):
+        r = max(1.0, math.sqrt(n * res * res / math.pi))
+        h = float(chm[max(0, j - 1):j + 2, max(0, i - 1):i + 2].max())
+        out.append({"x": round(x0 + (i + 0.5) * res, 2), "y": round(y0 + (j + 0.5) * res, 2),
+                    "z": round(float(dtm[j, i]), 2), "h": round(h, 2), "r": round(r, 2)})
+    return out
+
+
+def sidewalk_mesh(polys, rect, res, dtm, origin, road, cell=1.0, lift=0.04, skirt=0.25):
+    """Calçadas do GeoSampa drapeadas no MDT, com face de meio-fio (saia) nas bordas."""
+    ox, oy = origin
+    tops, sides, info = [], [], []
+    for pid, poly, props in polys:
+        x0, y0, x1, y1 = poly.bounds
+        pieces = []
+        for gx in np.arange(math.floor(x0), x1, cell):
+            for gy in np.arange(math.floor(y0), y1, cell):
+                q = poly.intersection(shapely.box(gx, gy, gx + cell, gy + cell))
+                pieces += [g for g in getattr(q, "geoms", [q]) if g.geom_type == "Polygon" and g.area > 1e-4]
+        for pc in pieces:
+            for t in triangulate(pc):
+                (xa, ya), (xb, yb), (xc, yc) = t
+                if (xb - xa) * (yc - ya) - (xc - xa) * (yb - ya) < 0:
+                    t = [t[0], t[2], t[1]]
+                for x, y in t:
+                    z = float(sample(dtm, rect, res, x, y)) + lift
+                    tops += [round(x - ox, 2), round(y - oy, 2), round(z, 2)]
+        # altura do meio-fio: mediana dentro menos mediana numa faixa de 0,5-2 m fora
+        # só o lado da rua (fora da quadra viária), não o lado do lote
+        ring = poly.buffer(2.0).difference(poly.buffer(0.5)).intersection(road)
+        def med(g):
+            xs, ys = np.meshgrid(np.arange(x0 - 2, x1 + 2, res), np.arange(y0 - 2, y1 + 2, res))
+            m = shapely.contains_xy(g, xs, ys)
+            return float(np.median(sample(dtm, rect, res, xs[m], ys[m]))) if m.any() else None
+        zin, zout = med(poly), med(ring)
+        curb = round(zin - zout, 2) if zin is not None and zout is not None else None
+        for r in [poly.exterior, *poly.interiors]:
+            line = r.segmentize(1.0)
+            cs = list(line.coords)
+            for (xa, ya), (xb, yb) in zip(cs[:-1], cs[1:]):
+                za = float(sample(dtm, rect, res, xa, ya)) + lift
+                zb = float(sample(dtm, rect, res, xb, yb)) + lift
+                A, Bp = (xa - ox, ya - oy), (xb - ox, yb - oy)
+                for (x, y), z in [(A, za - skirt), (Bp, zb - skirt), (Bp, zb), (A, za - skirt), (Bp, zb), (A, za)]:
+                    sides += [round(x, 2), round(y, 2), round(z, 2)]
+        info.append({"id": pid, "curb_m": curb, **props})
+    return tops, sides, info
+
+
+def point_cloud(rect, zref, X, Y, Z, C, R, G, B):
+    """Nuvem colorida compacta: int16 em cm (x, y, z relativos) + uint8 RGB."""
+    keep = ~np.isin(C, (7, 18))
+    xs = np.round((X[keep] - rect[0]) * 100).astype(np.int32)
+    ys = np.round((Y[keep] - rect[1]) * 100).astype(np.int32)
+    zs = np.round((Z[keep] - zref) * 100).astype(np.int32)
+    inside = (xs >= 0) & (ys >= 0) & (xs < 32767) & (ys < 32767) & (zs > -32767) & (zs < 32767)
+    pos = np.c_[xs[inside], ys[inside], zs[inside]].astype(np.int16)
+    rgb = (np.c_[R[keep], G[keep], B[keep]][inside] / 256).clip(0, 255).astype(np.uint8)
+    return pos.tobytes() + rgb.tobytes(), int(inside.sum())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="public/data")
@@ -232,12 +315,47 @@ def main():
         "area": drape(transform(to_utm, shape(area["geometry"]))),
     }, separators=(",", ":")))
 
+    # árvores (LiDAR classe 5) e conferência com o cadastro do GeoSampa
+    trees = detect_trees(rect, a.res, dtm, X, Y, Z, C)
+    cad = [transform(to_utm, shape(f["geometry"])) for f in geosampa_wfs("arvore", BBOX)]
+    if trees and cad:
+        tt = cKDTree([(t["x"], t["y"]) for t in trees])
+        dist, _ = tt.query([(p.x, p.y) for p in cad])
+        print(f"árvores cadastradas no GeoSampa: {len(cad)}, com árvore LiDAR a até 3 m: {(dist <= 3).sum()}")
+    for t in trees:
+        t["x"] = round(t["x"] - origin[0], 2); t["y"] = round(t["y"] - origin[1], 2)
+    (out / "trees.json").write_text(json.dumps(trees, separators=(",", ":")))
+
+    # calçadas (GeoSampa) recortadas no retângulo da cena
+    clip = shapely.box(*rect)
+    sw = []
+    for f in geosampa_wfs("calcada", BBOX):
+        g = transform(to_utm, shape(f["geometry"])).intersection(clip)
+        p = f["properties"]
+        for k, part in enumerate(gg for gg in getattr(g, "geoms", [g]) if gg.geom_type == "Polygon" and gg.area > 0.5):
+            sw.append((f"sw/{p['cd_identificador_calcada']}" + (f"_{k}" if k else ""), part,
+                       {"logradouro": p.get("nm_logradouro"), "largura_media_m": p.get("qt_largura_media_trecho")}))
+    quadras = shapely.union_all([transform(to_utm, shape(f["geometry"])) for f in geosampa_wfs("quadra_viaria_editada", BBOX)])
+    road = clip.difference(quadras)
+    sw_top, sw_side, sw_info = sidewalk_mesh(sw, rect, a.res, dtm, origin, road)
+    (out / "sidewalks.json").write_text(json.dumps({"top": sw_top, "side": sw_side, "info": sw_info},
+                                                   separators=(",", ":")))
+
+    pc, npts = point_cloud(rect, float(dtm.min()), X, Y, Z, C, R, G, B)
+    (out / "points.bin").write_bytes(pc)
+
     meta = {"crs": "EPSG:31983", "origin_utm": origin, "size": [rect[2] - rect[0], rect[3] - rect[1]],
             "dtm": {"res": a.res, "nx": nx, "ny": ny, "min": round(float(dtm.min()), 2), "max": round(float(dtm.max()), 2)},
             "ortho": {"file": "ortho.jpg", "res": a.tex, "source": "lidar_2017_rgb",
-                      "note": "cor do ponto LiDAR mais alto por célula; ortofoto GeoSampa sem download direto"}}
+                      "note": "cor do ponto LiDAR mais alto por célula; ortofoto GeoSampa sem download direto"},
+            "points": {"file": "points.bin", "count": npts, "encoding": "int16 cm (x,y relativos à origem, z relativo a dtm.min) + uint8 RGB"},
+            "trees": len(trees), "sidewalks": len(sw_info)}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
 
+    curbs = [i["curb_m"] for i in sw_info if i["curb_m"] is not None]
+    print(f"árvores LiDAR: {len(trees)} (altura {min(t['h'] for t in trees):.1f}-{max(t['h'] for t in trees):.1f} m)" if trees else "árvores: 0")
+    print(f"calçadas: {len(sw_info)}, meio-fio mediano {np.median(curbs):.2f} m" if curbs else f"calçadas: {len(sw_info)}")
+    print(f"nuvem: {npts} pontos")
     total = sum(f.stat().st_size for f in out.iterdir())
     print(f"extensão {meta['size'][0]} x {meta['size'][1]} m, MDT {nx}x{ny} @ {a.res} m, cota {meta['dtm']['min']}-{meta['dtm']['max']}")
     print(f"textura {tex.size[0]}x{tex.size[1]} @ {a.tex} m; prédios {len(info)}, triângulos paredes {len(walls)//9}, telhados {len(roofs)//9}")

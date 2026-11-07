@@ -7,6 +7,7 @@ const DATA = `${import.meta.env.BASE_URL}data/scene/`;
 
 type Meta = {
   size: [number, number];
+  points: { file: string; count: number };
   dtm: { res: number; nx: number; ny: number; min: number; max: number };
   ortho: { file: string; source: string };
 };
@@ -33,6 +34,9 @@ export default function Scene3D() {
   const [picked, setPicked] = useState<Picked>(null);
   const [status, setStatus] = useState("Carregando dados…");
   const [texOnRoofs, setTexOnRoofs] = useState(true);
+  const [layers, setLayers] = useState({ trees: true, sidewalks: true, cloud: false, model: true });
+  const groups = useRef<Record<string, THREE.Object3D>>({});
+  const loadCloud = useRef<() => Promise<void>>();
   const roofMat = useRef<THREE.MeshStandardMaterial>();
   const roofTex = useRef<THREE.Texture>();
 
@@ -132,6 +136,79 @@ export default function Scene3D() {
       for (const s of lines.streets) addLine(s.pts, "#e53e3e", 0.25);
       for (const a of lines.area) addLine(a, "#f6ad1a", 0.3);
 
+      // modelo existente (prédios + calçadas) agrupado para poder esconder ao ver a nuvem
+      const model = new THREE.Group();
+      scene.remove(walls, roofs);
+      model.add(walls, roofs, ground);
+      scene.add(model);
+      groups.current.model = model;
+
+      // calçadas (GeoSampa) com face de meio-fio
+      const sw = await fetch(`${DATA}sidewalks.json`).then((r) => r.json());
+      const swGroup = new THREE.Group();
+      const swMat = new THREE.MeshStandardMaterial({ color: "#d9d6cf", roughness: 1, side: THREE.DoubleSide });
+      for (const key of ["top", "side"] as const) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(toThree(sw[key], zRef), 3));
+        g.computeVertexNormals();
+        const m = new THREE.Mesh(g, swMat);
+        m.receiveShadow = true;
+        swGroup.add(m);
+      }
+      model.add(swGroup);
+      groups.current.sidewalks = swGroup;
+
+      // árvores (LiDAR classe 5): tronco + copa instanciados
+      const trees: { x: number; y: number; z: number; h: number; r: number }[] =
+        await fetch(`${DATA}trees.json`).then((r) => r.json());
+      const trunk = new THREE.InstancedMesh(
+        new THREE.CylinderGeometry(0.15, 0.22, 1, 6).translate(0, 0.5, 0),
+        new THREE.MeshStandardMaterial({ color: "#6b4f3a", roughness: 1 }), trees.length);
+      const crown = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(1, 1),
+        new THREE.MeshStandardMaterial({ color: "#4f7d3a", roughness: 0.9, flatShading: true }), trees.length);
+      const mtx = new THREE.Matrix4();
+      trees.forEach((t, i) => {
+        const base = t.z - zRef;
+        const cr = Math.min(t.r, t.h * 0.45);
+        const crownH = Math.max(cr * 1.6, t.h * 0.55);
+        const trunkH = t.h - crownH * 0.75;
+        mtx.compose(new THREE.Vector3(t.x, base, -t.y), new THREE.Quaternion(), new THREE.Vector3(1, Math.max(trunkH, 1), 1));
+        trunk.setMatrixAt(i, mtx);
+        mtx.compose(new THREE.Vector3(t.x, base + t.h - crownH / 2, -t.y), new THREE.Quaternion(),
+          new THREE.Vector3(cr, crownH / 2, cr));
+        crown.setMatrixAt(i, mtx);
+      });
+      trunk.castShadow = crown.castShadow = true;
+      const treeGroup = new THREE.Group();
+      treeGroup.add(trunk, crown);
+      scene.add(treeGroup);
+      groups.current.trees = treeGroup;
+
+      // nuvem LiDAR colorida: carregada só quando ativada
+      loadCloud.current = async () => {
+        if (groups.current.cloud) return;
+        const buf = await fetch(`${DATA}${meta.points.file}`).then((r) => r.arrayBuffer());
+        const n = meta.points.count;
+        const p16 = new Int16Array(buf, 0, n * 3);
+        const rgb = new Uint8Array(buf, n * 6, n * 3);
+        const pos = new Float32Array(n * 3);
+        const col = new Float32Array(n * 3);
+        const lut = Array.from({ length: 256 }, (_, v) => new THREE.Color().setRGB(v / 255, 0, 0, THREE.SRGBColorSpace).r);
+        for (let i = 0; i < n * 3; i++) col[i] = lut[rgb[i]];
+        for (let i = 0; i < n; i++) {
+          pos[i * 3] = p16[i * 3] / 100;
+          pos[i * 3 + 1] = p16[i * 3 + 2] / 100;
+          pos[i * 3 + 2] = -p16[i * 3 + 1] / 100;
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+        g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+        const cloud = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.5, vertexColors: true }));
+        scene.add(cloud);
+        groups.current.cloud = cloud;
+      };
+
       // câmera e sol
       const cx = W / 2, cz = -H / 2;
       controls.target.set(cx, 4, cz);
@@ -152,7 +229,7 @@ export default function Scene3D() {
       if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
       const r = renderer.domElement.getBoundingClientRect();
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
-      const hit = ray.intersectObjects(pickables)[0];
+      const hit = ray.intersectObjects(pickables).find((h) => h.object.visible && h.object.parent?.visible);
       if (!hit || hit.faceIndex == null) return setPicked(null);
       const v = hit.faceIndex * 3;
       const key = hit.object.userData.kind === "roof" ? "roof" : "walls";
@@ -190,6 +267,20 @@ export default function Scene3D() {
     m.needsUpdate = true;
   }, [texOnRoofs, status]);
 
+  useEffect(() => {
+    const g = groups.current;
+    if (g.trees) g.trees.visible = layers.trees;
+    if (g.sidewalks) g.sidewalks.visible = layers.sidewalks;
+    if (g.model) g.model.visible = layers.model;
+    if (layers.cloud && !g.cloud && loadCloud.current) {
+      setStatus("Carregando nuvem LiDAR…");
+      loadCloud.current().then(() => setStatus("")).catch((e) => setStatus(`Erro na nuvem: ${e}`));
+    }
+    if (g.cloud) g.cloud.visible = layers.cloud;
+  }, [layers, status]);
+
+  const toggle = (k: keyof typeof layers) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setLayers((l) => ({ ...l, [k]: e.target.checked }));
   const fmt = (v: number | null) => (v == null ? "—" : `${v.toFixed(2)} m`);
   const label = (k: string) => HEIGHT_SOURCES.find(([s]) => s === k)?.[2] ?? k;
 
@@ -205,6 +296,22 @@ export default function Scene3D() {
         <label className="row" style={{ marginTop: 8 }}>
           <input type="checkbox" checked={texOnRoofs} onChange={(e) => setTexOnRoofs(e.target.checked)} />
           Textura nos telhados
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={layers.model} onChange={toggle("model")} />
+          Terreno, prédios e calçadas
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={layers.sidewalks} onChange={toggle("sidewalks")} />
+          Calçadas (GeoSampa)
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={layers.trees} onChange={toggle("trees")} />
+          Árvores (LiDAR)
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={layers.cloud} onChange={toggle("cloud")} />
+          Nuvem LiDAR colorida (3,7 MB)
         </label>
         {status && <div style={{ marginTop: 6 }}>{status}</div>}
         {picked && (

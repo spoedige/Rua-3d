@@ -30,7 +30,7 @@ UA = {"User-Agent": "rua-3d/0.1"}
 
 # edificações descartadas por id (ver CLAUDE.md)
 EXCLUDE_IDS = {
-    "ms/13",  # Microsoft, 1.134 m², funde várias construções e fica quase todo fora da faixa
+    "ms/333509_7385277",  # antigo ms/13: Microsoft, 1.134 m², funde várias construções e fica quase todo fora da faixa
 }
 
 to_utm = Transformer.from_crs(4326, 31983, always_xy=True).transform
@@ -340,10 +340,25 @@ def main():
     for i, (g, h) in enumerate(ms_buildings(area.centroid.y, area.centroid.x, area)):
         cands.append((f"ms/{i}", "microsoft", g, {}, (h, "ms_estimate")))
 
+    # id estável: prefixo da fonte + centroide UTM arredondado a 1 m (não depende da ordem dos arquivos)
+    stable, seen = [], set()
+    for legacy, source, g, props, fb in cands:
+        cu = transform(to_utm, g).centroid
+        sid = f"{legacy.split('/')[0]}/{cu.x:.0f}_{cu.y:.0f}"
+        k = 2
+        while sid in seen:
+            sid = f"{legacy.split('/')[0]}/{cu.x:.0f}_{cu.y:.0f}_{k}"
+            k += 1
+        seen.add(sid)
+        stable.append((sid, source, g, {**props, "src_id": legacy}, fb))
+    cands = stable
+
     from shapely.ops import unary_union
     kept, covered = [], None
     for c in cands:
-        if c[0] in EXCLUDE_IDS:
+        if c[0] in EXCLUDE_IDS or c[3]["src_id"] in EXCLUDE_IDS:
+            if c[0] not in EXCLUDE_IDS:
+                print(f"aviso: EXCLUDE_IDS usa id antigo {c[3]['src_id']}; troque por {c[0]}")
             print(f"excluído: {c[0]}")
             continue
         gu = transform(to_utm, c[2])
@@ -362,8 +377,11 @@ def main():
         eave = ridge = None
         if lid and lid[0] >= 2.0:
             eave, ridge = round(lid[1], 2), round(lid[2], 2)
-        if bid in manual:
-            h, src = manual[bid], "manual"
+        mkey = bid if bid in manual else props["src_id"] if props["src_id"] in manual else None
+        if mkey and mkey != bid:
+            print(f"aviso: heights_manual.csv usa id antigo {mkey}; troque por {bid}")
+        if mkey:
+            h, src = manual[mkey], "manual"
         elif eave is not None:
             h, src = lid[0], "lidar_2017"
         else:
