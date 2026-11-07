@@ -29,7 +29,7 @@ from shapely.geometry import LineString, Polygon, shape
 from shapely.ops import split, transform
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fetch_data import geosampa_wfs, num, to_utm  # noqa: E402
+from fetch_data import geosampa_wfs, num, read_table, to_utm  # noqa: E402
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -297,16 +297,21 @@ def frontages(poly, road, walk, axes):
 
 def sync_facades_csv(path, rows):
     """Cria/atualiza o CSV sem apagar o que o usuário já preencheu."""
-    old = {}
+    old, fmt = {}, {"delimiter": ",", "encoding": "utf-8"}
     if path.exists():
-        for r in csv.DictReader(path.open(encoding="utf-8")):
-            old[(r["id"], r["rua"])] = r
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=FACADE_COLS)
+        rows_old, fmt = read_table(path)
+        for r in rows_old:
+            old[(r.get("id"), r.get("rua"))] = r
+    # regrava no mesmo formato em que o usuário salvou (ex.: ; e BOM do Excel)
+    with path.open("w", encoding=fmt["encoding"], newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=FACADE_COLS, delimiter=fmt["delimiter"])
         w.writeheader()
         for r in rows:
             prev = old.get((r["id"], r["rua"]), {})
-            w.writerow({**{c: prev.get(c, "") for c in USER_COLS}, **r})
+            row = {**{c: prev.get(c, "") for c in USER_COLS}, **r}
+            if fmt["delimiter"] == ";":  # Excel BR: vírgula decimal, senão 19.2 vira data
+                row["largura_frente_m"] = str(row["largura_frente_m"]).replace(".", ",")
+            w.writerow(row)
     return old
 
 
@@ -528,7 +533,7 @@ def main():
     csv_path = data / "fachadas.csv"
     sync_facades_csv(csv_path, rows)
     ann = {}
-    for r in csv.DictReader(csv_path.open(encoding="utf-8")):
+    for r in read_table(csv_path)[0]:
         if any((r.get(c) or "").strip() for c in USER_COLS):
             ann.setdefault(r["id"], {}).update({k: v for k, v in r.items() if (v or "").strip()})
     bj = json.loads((out / "buildings.json").read_text())

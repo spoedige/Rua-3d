@@ -214,12 +214,30 @@ def lidar_height(g_utm, gx, gy, diff, min_cells=8):
     return float(np.median(v)), float(np.percentile(v, 20)), float(np.percentile(v, 90))
 
 
-def manual_heights(path):
+def read_table(path):
+    """Lê CSV do jeito que vier: separador , ou ; (Excel BR) e UTF-8, UTF-8 com BOM ou Windows-1252.
+    Devolve (linhas, formato) para que o arquivo possa ser regravado no mesmo formato."""
     import csv
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    head = text.splitlines()[0] if text else ""
+    delim = ";" if head.count(";") > head.count(",") else ","
+    rows = [{(k or "").strip(): (v or "").strip() for k, v in r.items()}
+            for r in csv.DictReader(text.splitlines(), delimiter=delim)]
+    fmt = {"delimiter": delim, "encoding": "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") or enc == "cp1252" else "utf-8"}
+    return rows, fmt
+
+
+def manual_heights(path):
     if not path.exists():
         return {}
     res = {}
-    for row in csv.DictReader(path.open(encoding="utf-8")):
+    for row in read_table(path)[0]:
         alt = num(row.get("altura_m"))
         pav = num(row.get("pavimentos"))
         if alt:
