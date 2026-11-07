@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { HEIGHT_SOURCES } from "./MapView";
+import { PixelPass } from "./pixel";
+import { Traffic } from "./traffic";
 
 const DATA = `${import.meta.env.BASE_URL}data/scene/`;
 
@@ -39,6 +41,15 @@ export default function Scene3D() {
   const loadCloud = useRef<() => Promise<void>>();
   const roofMat = useRef<THREE.MeshStandardMaterial>();
   const roofTex = useRef<THREE.Texture>();
+  // modo pixel e tráfego: lidos a cada quadro pelo loop de animação
+  const [fx, setFx] = useState({ pixel: false, px: 4, levels: 6, outline: true });
+  const [tr, setTr] = useState({ on: true, density: 4, paused: false, peds: false });
+  const fxRef = useRef(fx);
+  fxRef.current = fx;
+  const trRef = useRef(tr);
+  trRef.current = tr;
+  const traffic = useRef<Traffic>();
+  const [counts, setCounts] = useState({ cars: 0, peds: 0 });
 
   useEffect(() => {
     const el = ref.current!;
@@ -209,6 +220,15 @@ export default function Scene3D() {
         groups.current.cloud = cloud;
       };
 
+      // tráfego animado nos eixos das vias
+      const td = await fetch(`${DATA}traffic.json`).then((r) => r.json());
+      const t = new Traffic(td, zRef);
+      t.setCars(trRef.current.density);
+      t.setPeds(trRef.current.peds);
+      scene.add(t.group);
+      traffic.current = t;
+      setCounts(t.counts);
+
       // câmera e sol
       const cx = W / 2, cz = -H / 2;
       controls.target.set(cx, 4, cz);
@@ -244,14 +264,25 @@ export default function Scene3D() {
       renderer.setSize(el.clientWidth, el.clientHeight);
     };
     window.addEventListener("resize", onResize);
+    const pixel = new PixelPass();
+    const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 0.1);
       controls.update();
-      renderer.render(scene, camera);
+      const t = traffic.current;
+      if (t) {
+        t.group.visible = trRef.current.on;
+        if (trRef.current.on && !trRef.current.paused) t.update(dt);
+      }
+      const f = fxRef.current;
+      if (f.pixel) pixel.render(renderer, scene, camera, f);
+      else renderer.render(scene, camera);
     });
 
     return () => {
       disposed = true;
       renderer.setAnimationLoop(null);
+      pixel.dispose();
       window.removeEventListener("resize", onResize);
       controls.dispose();
       renderer.dispose();
@@ -278,6 +309,20 @@ export default function Scene3D() {
     }
     if (g.cloud) g.cloud.visible = layers.cloud;
   }, [layers, status]);
+
+  useEffect(() => {
+    const t = traffic.current;
+    if (!t) return;
+    t.setCars(tr.density);
+    setCounts(t.counts);
+  }, [tr.density]);
+
+  useEffect(() => {
+    const t = traffic.current;
+    if (!t) return;
+    t.setPeds(tr.peds);
+    setCounts(t.counts);
+  }, [tr.peds]);
 
   const toggle = (k: keyof typeof layers) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setLayers((l) => ({ ...l, [k]: e.target.checked }));
@@ -313,6 +358,50 @@ export default function Scene3D() {
           <input type="checkbox" checked={layers.cloud} onChange={toggle("cloud")} />
           Nuvem LiDAR colorida (3,7 MB)
         </label>
+        <details className="group" open>
+          <summary>Modo pixel</summary>
+          <label className="row">
+            <input type="checkbox" checked={fx.pixel} onChange={(e) => setFx({ ...fx, pixel: e.target.checked })} />
+            Ligado
+          </label>
+          <label className="row slider">
+            Pixel {fx.px}px
+            <input type="range" min={2} max={12} value={fx.px} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, px: +e.target.value })} />
+          </label>
+          <label className="row slider">
+            Cores/canal {fx.levels}
+            <input type="range" min={2} max={12} value={fx.levels} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, levels: +e.target.value })} />
+          </label>
+          <label className="row">
+            <input type="checkbox" checked={fx.outline} disabled={!fx.pixel}
+              onChange={(e) => setFx({ ...fx, outline: e.target.checked })} />
+            Contorno
+          </label>
+        </details>
+        <details className="group" open>
+          <summary>Tráfego ({counts.cars} carros{tr.peds ? `, ${counts.peds} pedestres` : ""})</summary>
+          <label className="row">
+            <input type="checkbox" checked={tr.on} onChange={(e) => setTr({ ...tr, on: e.target.checked })} />
+            Mostrar
+          </label>
+          <label className="row slider">
+            Densidade {tr.density}/100 m
+            <input type="range" min={0} max={12} value={tr.density} disabled={!tr.on}
+              onChange={(e) => setTr({ ...tr, density: +e.target.value })} />
+          </label>
+          <label className="row">
+            <input type="checkbox" checked={tr.paused} disabled={!tr.on}
+              onChange={(e) => setTr({ ...tr, paused: e.target.checked })} />
+            Pausar
+          </label>
+          <label className="row">
+            <input type="checkbox" checked={tr.peds} disabled={!tr.on}
+              onChange={(e) => setTr({ ...tr, peds: e.target.checked })} />
+            Pedestres nas calçadas
+          </label>
+        </details>
         {status && <div style={{ marginTop: 6 }}>{status}</div>}
         {picked && (
           <div className="popup" style={{ marginTop: 8 }}>

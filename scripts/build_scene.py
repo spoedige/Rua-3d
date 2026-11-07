@@ -341,6 +341,54 @@ def main():
     (out / "sidewalks.json").write_text(json.dumps({"top": sw_top, "side": sw_side, "info": sw_info},
                                                    separators=(",", ":")))
 
+    # tráfego: faixas por sentido (mão à direita) e caminhos de pedestre nas calçadas
+    sw_union = shapely.union_all([g for _, g, _ in sw]) if sw else None
+    def path(ln, step=1.0, lift=0.0):
+        ln = ln.intersection(clip)
+        res = []
+        for part in getattr(ln, "geoms", [ln]):
+            if part.geom_type != "LineString" or part.length < 5:
+                continue
+            k = max(2, int(part.length / step) + 1)
+            q = [part.interpolate(t, normalized=True) for t in np.linspace(0, 1, k)]
+            xs, ys = np.array([v.x for v in q]), np.array([v.y for v in q])
+            zs = sample(dtm, rect, a.res, xs, ys) + lift
+            res.append([v for x, y, z in zip(xs, ys, zs) for v in (round(x - origin[0], 2), round(y - origin[1], 2), round(float(z), 2))])
+        return res
+    lanes, walks = [], []
+    for f in streets:
+        axis = transform(to_utm, shape(f["geometry"]))
+        for ax in getattr(axis, "geoms", [axis]):
+            if ax.length < 5:
+                continue
+            # meia largura do leito = distância do eixo à quadra viária (alinhamento do meio-fio)
+            pts = [ax.interpolate(t, normalized=True) for t in np.linspace(0.05, 0.95, 15)]
+            hw = float(np.median([quadras.boundary.distance(q) for q in pts]))
+            hw = min(max(hw, 2.5), 8.0)
+            ow = f["properties"].get("oneway")
+            if ow in (1, -1, "yes", "-1", True):
+                line = ax if ow not in (-1, "-1") else LineString(list(ax.coords)[::-1])
+                for l in path(line):
+                    lanes.append({"name": f["properties"].get("name"), "pts": l, "oneway": True, "hw": round(hw, 2)})
+            else:
+                off = hw / 2
+                fwd = ax.offset_curve(-off)  # direita no sentido do desenho
+                back = ax.offset_curve(off)
+                back = LineString(list(back.coords)[::-1])
+                for line in (fwd, back):
+                    for l in path(line):
+                        lanes.append({"name": f["properties"].get("name"), "pts": l, "oneway": False, "hw": round(hw, 2)})
+            if sw_union is not None:
+                for side in (-1, 1):
+                    wl = ax.offset_curve(side * (hw + 0.8))
+                    wl = wl.intersection(sw_union.buffer(0.6))
+                    for part in getattr(wl, "geoms", [wl]):
+                        if part.geom_type == "LineString" and part.length > 8:
+                            walks += path(part, lift=0.06)
+            print(f"via {f['properties'].get('name')}: meia largura {hw:.2f} m, mão {'única' if ow in (1, -1, 'yes', '-1', True) else 'dupla'}")
+    (out / "traffic.json").write_text(json.dumps({"lanes": lanes, "walks": walks}, separators=(",", ":")))
+    print(f"faixas de tráfego: {len(lanes)}, caminhos de pedestre: {len(walks)}")
+
     pc, npts = point_cloud(rect, float(dtm.min()), X, Y, Z, C, R, G, B)
     (out / "points.bin").write_bytes(pc)
 
