@@ -20,5 +20,12 @@
   "res": 0.25,
   "source": "lidar_2017_rgb",
   "note": "cor do ponto LiDAR mais alto por c\u00e9lula; ortofoto GeoSampa sem download direto"
- }
+ },
+ "points": {
+  "file": "points.bin",
+  "count": 423429,
+  "encoding": "int16 cm (x,y relativos \u00e0 origem, z relativo a dtm.min) + uint8 RGB"
+ },
+ "trees": 36,
+ "sidewalks": 29
 }
