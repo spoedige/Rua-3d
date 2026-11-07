@@ -39,4 +39,12 @@ src/                    App.tsx (rotas #/ e #/3d), MapView.tsx (etapa 2), Scene3
 3a. (feito) Cena three.js em `#/3d`; `python scripts/build_scene.py` gera os assets. Escopo: terreno LiDAR 0,5 m (MDT, classe 2) recortado na bbox; prédios com telhado de duas águas (beiral `height_eave`, cumeeira `height_ridge`) e fachadas neutras; ortofoto GeoSampa no chão e no topo dos telhados (fallback: cor RGB dos pontos LiDAR `MDS_color`); câmera orbital. Peso dos assets publicados < 15 MB
 3b. (feito) Camadas de árvores, calçadas e nuvem (`points.bin`, 3,7 MB, carregada sob demanda); assets da cena 4,9 MB. Escopo: Árvores (classe 5) e calçadas/meio-fio do LiDAR; nuvem colorida como camada opcional; troca de ids por id estável derivado do centroide (fonte + E/N UTM arredondados), migrando `EXCLUDE_IDS` e `heights_manual.csv`
 3c. (feito) Modo pixel (render em baixa resolução + nearest, cores por canal, contorno por profundidade; `src/pixel.ts`) e tráfego animado (`src/traffic.ts`, `traffic.json`): carros nas faixas deslocadas meia largura do eixo, mão à direita, mão única quando `oneway`; densidade, pausa e pedestres opcionais nas calçadas. Leito estimado pela distância do eixo à quadra viária (5-6,3 m). Fachadas: Mapillary pendente (API exige token; licença das imagens CC BY-SA 4.0). Street View do Google não pode ser usado como textura (termos de uso)
+3d. (feito) Fachadas procedurais a partir de `public/data/fachadas.csv` (gerado pelo build_scene.py; regerar não apaga o que foi preenchido). Prédio sem anotação fica neutro. Nenhuma imagem do Street View entra como dado: só anotações feitas por observação
 4. Camada de proposta: importar glTF ou desenhar volumes, alternando existente/proposta
+
+## Preenchimento de fachadas.csv
+- Uma linha por prédio e rua; `id`, `rua`, `lado` (posição do prédio em relação à rua) e `largura_frente_m` são calculados, não edite. `outra via` = face para rua fora da faixa.
+- `pavimentos` (inteiro), `janelas_por_pav` (inteiro, janelas na frente por andar) e `muro_altura_m` (m; vazio = sem muro; só aparece se houver recuo).
+- `cor_hex` = cor predominante da fachada, ex. `#e8c35a`; vazio usa a cor do `material`: reboco, tijolo, cerâmica ou concreto.
+- `tipo_acesso`: porta, portão, garagem ou loja (desenhado no térreo, à esquerda de quem olha da rua). `observacao` é livre e não afeta a cena.
+- Depois de editar: `python scripts/build_scene.py && npm run build` e publicar. Anote por observação; não copie nem processe pixels de fotos de terceiros.

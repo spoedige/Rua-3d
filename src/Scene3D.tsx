@@ -79,6 +79,8 @@ export default function Scene3D() {
     scene.add(sun, sun.target);
 
     const pickables: THREE.Mesh[] = [];
+    // cota do terreno (coords three) para manter alvo e câmera acima do chão
+    let groundAt: (x: number, z: number) => number = () => 0;
     let infos: Info[] = [];
 
     (async () => {
@@ -96,6 +98,11 @@ export default function Scene3D() {
       const [W, H] = meta.size;
       const { nx, ny, res, min: zRef } = meta.dtm;
       const dtm = new Float32Array(dtmBuf);
+      groundAt = (x, z) => {
+        const i = Math.min(nx - 1, Math.max(0, Math.round(x / res)));
+        const j = Math.min(ny - 1, Math.max(0, Math.round(-z / res)));
+        return dtm[j * nx + i] - zRef;
+      };
 
       // terreno: linhas do MDT de sul para norte; linhas do plano de norte para sul
       const tg = new THREE.PlaneGeometry((nx - 1) * res, (ny - 1) * res, nx - 1, ny - 1);
@@ -114,8 +121,15 @@ export default function Scene3D() {
       const wallGeo = new THREE.BufferGeometry();
       wallGeo.setAttribute("position", new THREE.BufferAttribute(toThree(bld.walls, zRef), 3));
       wallGeo.computeVertexNormals();
+      // cor das paredes por prédio (fachadas.csv; sem anotação = neutro)
+      const srgb = (v: number) => new THREE.Color().setRGB(v / 255, 0, 0, THREE.SRGBColorSpace).r;
+      if (bld.wall_colors?.length) {
+        const wc = new Float32Array(bld.wall_colors.length);
+        for (let i = 0; i < wc.length; i++) wc[i] = srgb(bld.wall_colors[i]);
+        wallGeo.setAttribute("color", new THREE.BufferAttribute(wc, 3));
+      }
       const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({
-        color: "#e9e4da", roughness: 0.9, side: THREE.DoubleSide,
+        color: "#ffffff", vertexColors: !!bld.wall_colors?.length, roughness: 0.9, side: THREE.DoubleSide,
       }));
       walls.castShadow = walls.receiveShadow = true;
       walls.userData.kind = "walls";
@@ -137,6 +151,23 @@ export default function Scene3D() {
       scene.add(walls, roofs);
       pickables.push(walls, roofs);
 
+      // janelas, acessos e muros procedurais
+      if (bld.details?.pos?.length) {
+        const dg = new THREE.BufferGeometry();
+        dg.setAttribute("position", new THREE.BufferAttribute(toThree(bld.details.pos, zRef), 3));
+        const dc = new Float32Array(bld.details.col.length);
+        for (let i = 0; i < dc.length; i++) dc[i] = srgb(bld.details.col[i]);
+        dg.setAttribute("color", new THREE.BufferAttribute(dc, 3));
+        dg.computeVertexNormals();
+        const det = new THREE.Mesh(dg, new THREE.MeshStandardMaterial({
+          vertexColors: true, roughness: 0.6, side: THREE.DoubleSide,
+          polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+        }));
+        det.castShadow = det.receiveShadow = true;
+        scene.add(det);
+        groups.current.details = det;
+      }
+
       // vias e faixa, levemente acima do chão
       const addLine = (pts: number[], color: string, lift: number) => {
         const p = toThree(pts, zRef - lift);
@@ -151,6 +182,7 @@ export default function Scene3D() {
       const model = new THREE.Group();
       scene.remove(walls, roofs);
       model.add(walls, roofs, ground);
+      if (groups.current.details) model.add(groups.current.details);
       scene.add(model);
       groups.current.model = model;
 
@@ -231,7 +263,7 @@ export default function Scene3D() {
 
       // câmera e sol
       const cx = W / 2, cz = -H / 2;
-      controls.target.set(cx, 4, cz);
+      controls.target.set(cx, groundAt(cx, cz) + 2, cz);
       camera.position.set(cx - 90, 110, cz + 140);
       sun.position.set(cx + 80, 160, cz + 60);
       sun.target.position.set(cx, 0, cz);
@@ -269,6 +301,11 @@ export default function Scene3D() {
     renderer.setAnimationLoop(() => {
       const dt = Math.min(clock.getDelta(), 0.1);
       controls.update();
+      // não deixa a câmera atravessar o terreno; alvo acompanha o chão ao mover
+      const gc = groundAt(camera.position.x, camera.position.z) + 1.6;
+      if (camera.position.y < gc) camera.position.y = gc;
+      const gt = groundAt(controls.target.x, controls.target.z);
+      if (Math.abs(controls.target.y - (gt + 2)) > 0.01) controls.target.y += (gt + 2 - controls.target.y) * 0.2;
       const t = traffic.current;
       if (t) {
         t.group.visible = trRef.current.on;

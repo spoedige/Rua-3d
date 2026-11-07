@@ -11,6 +11,7 @@ Saídas (coordenadas locais em metros: x = leste, y = norte, z = cota; origem em
 Uso: python scripts/build_scene.py   (depois de fetch_data.py; reaproveita data_cache/lidar)
 """
 import argparse
+import csv
 import json
 import math
 import sys
@@ -28,7 +29,7 @@ from shapely.geometry import LineString, Polygon, shape
 from shapely.ops import split, transform
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fetch_data import geosampa_wfs, to_utm  # noqa: E402
+from fetch_data import geosampa_wfs, num, to_utm  # noqa: E402
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -249,6 +250,127 @@ def point_cloud(rect, zref, X, Y, Z, C, R, G, B):
     return pos.tobytes() + rgb.tobytes(), int(inside.sum())
 
 
+FACADE_COLS = ["id", "rua", "lado", "largura_frente_m", "pavimentos", "cor_hex", "material",
+               "janelas_por_pav", "tipo_acesso", "muro_altura_m", "observacao"]
+USER_COLS = FACADE_COLS[4:]
+MATERIAL_COLOR = {"tijolo": "#a0573b", "ceramica": "#b5714f", "cerâmica": "#b5714f", "concreto": "#9c9a94", "reboco": "#e2dccf"}
+NEUTRAL = "#e9e4da"
+CARD = [("leste", (1, 0)), ("norte", (0, 1)), ("oeste", (-1, 0)), ("sul", (0, -1))]
+
+
+def cardinal(v):
+    return max(CARD, key=lambda c: c[1][0] * v[0] + c[1][1] * v[1])[0]
+
+
+def frontages(poly, road, walk, axes):
+    """Faces do prédio voltadas para a rua: arestas cuja normal externa encontra calçada/leito a até 10 m."""
+    poly = shapely.geometry.polygon.orient(max(getattr(poly, "geoms", [poly]), key=lambda g: g.area), 1.0)
+    res = []
+    cs = list(poly.exterior.coords)
+    for (xa, ya), (xb, yb) in zip(cs[:-1], cs[1:]):
+        L = math.hypot(xb - xa, yb - ya)
+        if L < 1.5:
+            continue
+        n = ((yb - ya) / L, -(xb - xa) / L)  # anti-horário: normal externa à direita
+        mx, my = (xa + xb) / 2, (ya + yb) / 2
+        hit_walk = hit_road = None
+        for k in np.arange(0.3, 10.01, 0.3):
+            q = shapely.Point(mx + n[0] * k, my + n[1] * k)
+            if hit_walk is None and walk is not None and walk.contains(q):
+                hit_walk = k
+            if road.contains(q):
+                hit_road = k
+                break
+            if poly.contains(q):
+                break
+        if hit_road is None:
+            continue
+        hit = shapely.Point(mx + n[0] * hit_road, my + n[1] * hit_road)
+        near = min(axes, key=lambda a: a[1].distance(hit)) if axes else None
+        # leito encontrado longe do eixo das vias da faixa = rua transversal fora do recorte
+        name = near[0] if near and near[1].distance(hit) <= 6.0 else "outra via"
+        setback = hit_walk if hit_walk is not None else hit_road
+        res.append({"a": (xa, ya), "b": (xb, yb), "n": n, "len": L, "rua": name,
+                    "lado": cardinal((-n[0], -n[1])), "setback": setback})
+    return res
+
+
+def sync_facades_csv(path, rows):
+    """Cria/atualiza o CSV sem apagar o que o usuário já preencheu."""
+    old = {}
+    if path.exists():
+        for r in csv.DictReader(path.open(encoding="utf-8")):
+            old[(r["id"], r["rua"])] = r
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=FACADE_COLS)
+        w.writeheader()
+        for r in rows:
+            prev = old.get((r["id"], r["rua"]), {})
+            w.writerow({**{c: prev.get(c, "") for c in USER_COLS}, **r})
+    return old
+
+
+def hex_rgb(h, default=NEUTRAL):
+    h = (h or "").strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return hex_rgb(default) if h != default.lstrip("#") else (233, 228, 218)
+
+
+def quad(pts, z0, z1, a, b, n, off, origin, col, out_p, out_c):
+    """Retângulo vertical no plano da fachada entre os parâmetros a..b (m ao longo da aresta)."""
+    (xa, ya), (ux, uy) = pts
+    ox, oy = origin
+    P = lambda t, z: (xa + ux * t + n[0] * off - ox, ya + uy * t + n[1] * off - oy, z)
+    v = [P(a, z0), P(b, z0), P(b, z1), P(a, z0), P(b, z1), P(a, z1)]
+    for x, y, z in v:
+        out_p += [round(x, 2), round(y, 2), round(z, 2)]
+        out_c += list(col)
+
+
+def facade_details(fr, base, eave, attrs, origin, out_p, out_c):
+    """Janelas, acesso e muro procedurais a partir das anotações do usuário."""
+    u = ((fr["b"][0] - fr["a"][0]) / fr["len"], (fr["b"][1] - fr["a"][1]) / fr["len"])
+    pts = (fr["a"], u)
+    L, n = fr["len"], fr["n"]
+    floors = max(1, int(num(attrs.get("pavimentos")) or max(1, round(eave / 2.9))))
+    fh = max(2.4, eave / floors)
+    wins = num(attrs.get("janelas_por_pav"))
+    wins = int(wins) if wins is not None else max(1, int(L // 3.5))
+    acc = (attrs.get("tipo_acesso") or "").strip().lower()
+    acc_w = {"garagem": 2.6, "portão": 1.1, "portao": 1.1, "porta": 0.9, "loja": min(4.0, L * 0.6)}.get(acc, 0.0)
+    acc_h = {"garagem": 2.2, "loja": 2.7}.get(acc, 2.1)
+    acc_c = {"garagem": (110, 115, 120), "loja": (61, 85, 102)}.get(acc, (90, 70, 50))
+    if acc_w and acc_w < L - 0.4:
+        quad(pts, base, base + acc_h, 0.3, 0.3 + acc_w, n, 0.05, origin, acc_c, out_p, out_c)
+    glass = (42, 53, 64)
+    for f in range(floors):
+        z0 = base + f * fh + 0.9
+        z1 = min(z0 + 1.1, base + (f + 1) * fh - 0.3)
+        if z1 <= z0:
+            continue
+        start = 0.3 + acc_w + 0.4 if (f == 0 and acc_w) else 0.4
+        span = L - 0.4 - start
+        if span < 1.0 or wins <= 0:
+            continue
+        ww = min(1.2, span / wins - 0.4)
+        if ww < 0.4:
+            continue
+        step = span / wins
+        for i in range(wins):
+            c = start + step * (i + 0.5)
+            quad(pts, z0, z1, c - ww / 2, c + ww / 2, n, 0.05, origin, glass, out_p, out_c)
+    muro = num(attrs.get("muro_altura_m"))
+    if muro and fr["setback"] > 0.6:
+        off = fr["setback"] - 0.1
+        col = tuple(int(c * 0.85) for c in hex_rgb(attrs.get("cor_hex")))
+        quad(pts, base - 0.5, base + muro, 0, L, n, off, origin, col, out_p, out_c)
+        quad(pts, base - 0.5, base + muro, L, 0, n, off + 0.15, origin, col, out_p, out_c)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="public/data")
@@ -290,7 +412,7 @@ def main():
         w0, r0 = len(walls) // 3, len(roofs) // 3
         wv, rv = building_mesh(p, base, eave, ridge, origin)
         walls += wv; roofs += rv
-        info.append({"id": pr["id"], "height_source": pr["height_source"], "height": pr["height"],
+        info.append({"id": pr["id"], "base": round(base, 2), "height_source": pr["height_source"], "height": pr["height"],
                      "eave": pr.get("height_eave"), "ridge": pr.get("height_ridge"),
                      "walls": [w0, len(walls) // 3 - w0], "roof": [r0, len(roofs) // 3 - r0]})
     (out / "buildings.json").write_text(json.dumps({"walls": walls, "roofs": roofs, "info": info},
@@ -388,6 +510,44 @@ def main():
             print(f"via {f['properties'].get('name')}: meia largura {hw:.2f} m, mão {'única' if ow in (1, -1, 'yes', '-1', True) else 'dupla'}")
     (out / "traffic.json").write_text(json.dumps({"lanes": lanes, "walks": walks}, separators=(",", ":")))
     print(f"faixas de tráfego: {len(lanes)}, caminhos de pedestre: {len(walks)}")
+
+    # fachadas voltadas para a rua: CSV para anotação manual + detalhes procedurais
+    axes = [(f["properties"].get("name"), transform(to_utm, shape(f["geometry"]))) for f in streets]
+    rows, fronts = [], {}
+    for f, p in zip(blds, polys):
+        bid = f["properties"]["id"]
+        frs = frontages(p, road, sw_union, axes)
+        fronts[bid] = frs
+        by_street = {}
+        for fr in frs:
+            by_street.setdefault(fr["rua"], []).append(fr)
+        for rua, lst in by_street.items():
+            main_side = max(lst, key=lambda x: x["len"])["lado"]
+            rows.append({"id": bid, "rua": rua or "", "lado": main_side,
+                         "largura_frente_m": round(sum(x["len"] for x in lst), 1)})
+    csv_path = data / "fachadas.csv"
+    sync_facades_csv(csv_path, rows)
+    ann = {}
+    for r in csv.DictReader(csv_path.open(encoding="utf-8")):
+        if any((r.get(c) or "").strip() for c in USER_COLS):
+            ann.setdefault(r["id"], {}).update({k: v for k, v in r.items() if (v or "").strip()})
+    bj = json.loads((out / "buildings.json").read_text())
+    wall_col, det_p, det_c = [], [], []
+    for b in bj["info"]:
+        at = ann.get(b["id"])
+        rgb = hex_rgb(NEUTRAL)
+        if at:
+            mat = (at.get("material") or "").strip().lower()
+            rgb = hex_rgb(at.get("cor_hex"), MATERIAL_COLOR.get(mat, NEUTRAL)) if at.get("cor_hex") else hex_rgb(MATERIAL_COLOR.get(mat, NEUTRAL))
+            eave = b["eave"] or b["height"]
+            for fr in fronts.get(b["id"], []):
+                facade_details(fr, b["base"], eave, at, origin, det_p, det_c)
+        wall_col += list(rgb) * b["walls"][1]
+        b["annotated"] = bool(at)
+    bj["wall_colors"] = wall_col
+    bj["details"] = {"pos": det_p, "col": det_c}
+    (out / "buildings.json").write_text(json.dumps(bj, separators=(",", ":")))
+    print(f"fachadas para a rua: {len(rows)} linhas em {csv_path} ({sum(1 for b in bj['info'] if b['annotated'])} prédios anotados)")
 
     pc, npts = point_cloud(rect, float(dtm.min()), X, Y, Z, C, R, G, B)
     (out / "points.bin").write_bytes(pc)
