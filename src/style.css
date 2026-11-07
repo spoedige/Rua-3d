@@ -12,3 +12,13 @@ html, body, #root { margin: 0; height: 100%; font-family: system-ui, sans-serif;
 .popup table { border-collapse: collapse; font-size: 12px; }
 .popup td { padding: 1px 6px 1px 0; }
 .popup td:first-child { color: #666; }
+.toggle {
+  position: absolute; z-index: 2; top: 12px; left: 50%; transform: translateX(-50%);
+  background: #1a202c; color: #fff; text-decoration: none; font-weight: 600; font-size: 14px;
+  padding: 8px 16px; border-radius: 999px; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+.toggle:hover { background: #2d3748; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; color: #444; }
+@media (max-width: 600px) {
+  .panel { top: auto; bottom: 28px; left: 8px; right: 8px; max-width: none; }
+}
