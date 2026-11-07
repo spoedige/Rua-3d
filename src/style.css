@@ -39,3 +39,4 @@ html, body, #root { margin: 0; height: 100%; font-family: system-ui, sans-serif;
   .panel { max-height: 55vh; }
   .panel.collapsed { left: 8px; right: auto; bottom: 28px; }
 }
+.chip { border: 0; background: #1a202c; color: #fff; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }

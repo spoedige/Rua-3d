@@ -255,6 +255,36 @@ FACADE_COLS = ["id", "rua", "lado", "largura_frente_m", "pavimentos", "cor_hex",
 USER_COLS = FACADE_COLS[4:]
 MATERIAL_COLOR = {"tijolo": "#a0573b", "ceramica": "#b5714f", "cerâmica": "#b5714f", "concreto": "#9c9a94", "reboco": "#e2dccf"}
 NEUTRAL = "#e9e4da"
+# cores claras típicas de casas paulistanas (fachada estimada, escolhida de forma fixa por id)
+HOUSE_COLORS = ["#f1e4c3", "#ead6a0", "#f3efe6", "#d8e5df", "#efc7a3", "#d3e2c0", "#e7e1d0", "#f2d0c4", "#cfdbe8"]
+ROOF_FLAT = {"ceramica": ["#a9462f", "#bf5a3c", "#d06e4b"], "fibrocimento": ["#8d949a"], "laje": ["#c9c4b8"]}
+GROUND_FLAT = {"leito": "#59626d", "calcada": "#d6cfc0", "verde": "#5e9f43", "quintal": "#b9b3a1", "fora": "#a7a196"}
+
+
+def stable_pick(key, options):
+    import zlib
+    return options[zlib.crc32(key.encode()) % len(options)]
+
+
+def roof_class(rgb):
+    r, g, b = rgb
+    if r > g + 18 and r > b + 30:
+        lum = 0.3 * r + 0.59 * g + 0.11 * b
+        shades = ROOF_FLAT["ceramica"]
+        return "ceramica", shades[0] if lum < 110 else shades[1] if lum < 150 else shades[2]
+    if (r + g + b) / 3 > 165:
+        return "laje", ROOF_FLAT["laje"][0]
+    return "fibrocimento", ROOF_FLAT["fibrocimento"][0]
+
+
+def estimate_facade(bid, eave, length):
+    """Fachada plausível quando não há anotação: só para leitura volumétrica, marcada como estimada."""
+    return {"pavimentos": str(max(1, min(4, round(eave / 2.9)))),
+            "janelas_por_pav": str(max(1, int(length // 3.2))),
+            "tipo_acesso": "garagem" if length >= 5.5 else "portão",
+            "cor_hex": stable_pick(bid, HOUSE_COLORS)}
+
+
 CARD = [("leste", (1, 0)), ("norte", (0, 1)), ("oeste", (-1, 0)), ("sul", (0, -1))]
 
 
@@ -537,18 +567,54 @@ def main():
         if any((r.get(c) or "").strip() for c in USER_COLS):
             ann.setdefault(r["id"], {}).update({k: v for k, v in r.items() if (v or "").strip()})
     bj = json.loads((out / "buildings.json").read_text())
+    poly_by_id = {f["properties"]["id"]: p for f, p in zip(blds, polys)}
+    tex_arr = np.asarray(tex)
+    th, tw = tex_arr.shape[:2]
     wall_col, det_p, det_c = [], [], []
     for b in bj["info"]:
         at = ann.get(b["id"])
-        rgb = hex_rgb(NEUTRAL)
+        eave = b["eave"] or b["height"]
+        frs = fronts.get(b["id"], [])
+        # cor do telhado: mediana da textura LiDAR dentro do footprint, classificada
+        pg = poly_by_id[b["id"]]
+        gx, gy = np.meshgrid(np.arange(pg.bounds[0], pg.bounds[2], a.tex), np.arange(pg.bounds[1], pg.bounds[3], a.tex))
+        m = shapely.contains_xy(pg.buffer(-0.5) if pg.area > 20 else pg, gx, gy)
+        if m.any():
+            ci = ((gx[m] - rect[0]) / a.tex).astype(int).clip(0, tw - 1)
+            ri = (th - 1 - ((gy[m] - rect[1]) / a.tex).astype(int)).clip(0, th - 1)
+            med = np.median(tex_arr[ri, ci], axis=0)
+            b["roof_type"], b["roof_color"] = roof_class(med)
+        else:
+            b["roof_type"], b["roof_color"] = "fibrocimento", ROOF_FLAT["fibrocimento"][0]
         if at:
             mat = (at.get("material") or "").strip().lower()
             rgb = hex_rgb(at.get("cor_hex"), MATERIAL_COLOR.get(mat, NEUTRAL)) if at.get("cor_hex") else hex_rgb(MATERIAL_COLOR.get(mat, NEUTRAL))
-            eave = b["eave"] or b["height"]
-            for fr in fronts.get(b["id"], []):
-                facade_details(fr, b["base"], eave, at, origin, det_p, det_c)
+            attrs, b["facade"] = at, "anotada"
+        else:
+            attrs = estimate_facade(b["id"], eave, max([f["len"] for f in frs], default=0))
+            rgb, b["facade"] = hex_rgb(attrs["cor_hex"]), "estimada" if frs else "fundo de lote"
+        main = max(frs, key=lambda f: f["len"]) if frs else None
+        for fr in frs:
+            fa = attrs if fr is main else {**attrs, "tipo_acesso": "", "muro_altura_m": attrs.get("muro_altura_m") if at else ""}
+            facade_details(fr, b["base"], eave, fa, origin, det_p, det_c)
+        b["wall_color"] = "#%02x%02x%02x" % tuple(rgb)
         wall_col += list(rgb) * b["walls"][1]
         b["annotated"] = bool(at)
+    # chão chapado: leito, calçada, vegetação (LiDAR classes 3-5) e quintais, 0,5 m
+    fr_ = 0.5
+    gw, gh = int(math.ceil((rect[2] - rect[0]) / fr_)), int(math.ceil((rect[3] - rect[1]) / fr_))
+    cx_, cy_ = np.meshgrid(rect[0] + (np.arange(gw) + 0.5) * fr_, rect[1] + (np.arange(gh) + 0.5) * fr_)
+    cls = np.full((gh, gw), 4, np.uint8)  # 4 = quintal
+    cls[~shapely.contains_xy(quadras, cx_, cy_)] = 0  # leito
+    if sw_union is not None:
+        cls[shapely.contains_xy(sw_union, cx_, cy_)] = 1  # calçada
+    veg = np.isin(C, (3, 4, 5))
+    vi = ((X[veg] - rect[0]) / fr_).astype(int); vj = ((Y[veg] - rect[1]) / fr_).astype(int)
+    ok = (vi >= 0) & (vi < gw) & (vj >= 0) & (vj < gh)
+    vm = np.zeros((gh, gw), bool); vm[vj[ok], vi[ok]] = True
+    cls[vm & (cls == 4)] = 2  # verde só dentro dos lotes
+    lut = np.array([hex_rgb(GROUND_FLAT[k]) for k in ("leito", "calcada", "verde", "fora", "quintal")], np.uint8)
+    Image.fromarray(lut[cls][::-1]).save(out / "flat.png", optimize=True)
     bj["wall_colors"] = wall_col
     bj["details"] = {"pos": det_p, "col": det_c}
     (out / "buildings.json").write_text(json.dumps(bj, separators=(",", ":")))

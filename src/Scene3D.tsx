@@ -37,6 +37,11 @@ export default function Scene3D() {
   const [picked, setPicked] = useState<Picked>(null);
   const [status, setStatus] = useState("Carregando dados…");
   const [texOnRoofs, setTexOnRoofs] = useState(true);
+  // estilo: realista (textura LiDAR) ou chapado (cores planas por classe)
+  const [style, setStyle] = useState<"realista" | "chapado">("realista");
+  const [flatReady, setFlatReady] = useState(false);
+  const mats = useRef<{ ground?: THREE.MeshStandardMaterial; crown?: THREE.MeshStandardMaterial;
+    flat?: THREE.Texture; roofGeo?: THREE.BufferGeometry; lines?: THREE.Group }>({});
   const [layers, setLayers] = useState({ trees: true, sidewalks: true, cloud: false, model: true });
   const groups = useRef<Record<string, THREE.Object3D>>({});
   const loadCloud = useRef<() => Promise<void>>();
@@ -124,7 +129,15 @@ export default function Scene3D() {
       for (let r = 0; r < ny; r++)
         for (let c = 0; c < nx; c++) pos.setY(r * nx + c, dtm[(ny - 1 - r) * nx + c] - zRef);
       tg.computeVertexNormals();
-      const ground = new THREE.Mesh(tg, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+      const groundMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 });
+      mats.current.ground = groundMat;
+      new THREE.TextureLoader().loadAsync(`${DATA}flat.png`).then((ft) => {
+        ft.colorSpace = THREE.SRGBColorSpace;
+        ft.magFilter = THREE.NearestFilter;
+        mats.current.flat = ft;
+        setFlatReady(true); // reaplica o estilo
+      });
+      const ground = new THREE.Mesh(tg, groundMat);
       ground.receiveShadow = true;
       scene.add(ground);
 
@@ -155,6 +168,17 @@ export default function Scene3D() {
       const roofGeo = new THREE.BufferGeometry();
       roofGeo.setAttribute("position", new THREE.BufferAttribute(roofPos, 3));
       roofGeo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+      // cor chapada por prédio (classe do telhado medida na textura LiDAR)
+      {
+        const rc = new Float32Array(roofPos.length);
+        const c = new THREE.Color();
+        for (const b of bld.info as (Info & { roof_color?: string })[]) {
+          c.set(b.roof_color ?? "#8d949a");
+          for (let v = b.roof[0]; v < b.roof[0] + b.roof[1]; v++) rc.set([c.r, c.g, c.b], v * 3);
+        }
+        roofGeo.setAttribute("color", new THREE.BufferAttribute(rc, 3));
+      }
+      mats.current.roofGeo = roofGeo;
       roofGeo.computeVertexNormals();
       roofMat.current = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, side: THREE.DoubleSide });
       const roofs = new THREE.Mesh(roofGeo, roofMat.current);
@@ -181,11 +205,14 @@ export default function Scene3D() {
       }
 
       // vias e faixa, levemente acima do chão
+      const lineGroup = new THREE.Group();
+      scene.add(lineGroup);
+      mats.current.lines = lineGroup;
       const addLine = (pts: number[], color: string, lift: number) => {
         const p = toThree(pts, zRef - lift);
         const g = new THREE.BufferGeometry();
         g.setAttribute("position", new THREE.BufferAttribute(p, 3));
-        scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: true })));
+        lineGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: true })));
       };
       for (const s of lines.streets) addLine(s.pts, "#e53e3e", 0.25);
       for (const a of lines.area) addLine(a, "#f6ad1a", 0.3);
@@ -221,7 +248,7 @@ export default function Scene3D() {
         new THREE.MeshStandardMaterial({ color: "#6b4f3a", roughness: 1 }), trees.length);
       const crown = new THREE.InstancedMesh(
         new THREE.IcosahedronGeometry(1, 1),
-        new THREE.MeshStandardMaterial({ color: "#4f7d3a", roughness: 0.9, flatShading: true }), trees.length);
+        (mats.current.crown = new THREE.MeshStandardMaterial({ color: "#4f7d3a", roughness: 0.9, flatShading: true })), trees.length);
       const mtx = new THREE.Matrix4();
       trees.forEach((t, i) => {
         const base = t.z - zRef;
@@ -364,10 +391,26 @@ export default function Scene3D() {
   useEffect(() => {
     const m = roofMat.current;
     if (!m) return;
-    m.map = texOnRoofs ? roofTex.current ?? null : null;
-    m.color.set(texOnRoofs ? "#ffffff" : "#b5651d");
+    const flat = style === "chapado";
+    m.map = !flat && texOnRoofs ? roofTex.current ?? null : null;
+    m.vertexColors = flat;
+    m.color.set(flat || texOnRoofs ? "#ffffff" : "#b5651d");
+    m.roughness = flat ? 1 : 0.8;
     m.needsUpdate = true;
-  }, [texOnRoofs, status]);
+    const g = mats.current.ground;
+    if (g) {
+      g.map = flat ? mats.current.flat ?? g.map : roofTex.current ?? null;
+      g.needsUpdate = true;
+    }
+    mats.current.crown?.color.set(flat ? "#4e9a35" : "#4f7d3a");
+    if (mats.current.lines) mats.current.lines.visible = !flat;
+  }, [texOnRoofs, style, status, flatReady]);
+
+  // atalho: estética de maquete em pixel art (chapado + isométrico + pixel pequeno + contorno)
+  const presetPixelCity = () => {
+    setStyle("chapado");
+    setFx({ ...fx, pixel: true, iso: true, px: 2, mode: "channels", levels: 12, saturation: 1.15, dither: false, outline: true });
+  };
 
   useEffect(() => {
     const g = groups.current;
@@ -428,6 +471,14 @@ export default function Scene3D() {
           <input type="checkbox" checked={layers.cloud} onChange={toggle("cloud")} />
           Nuvem LiDAR colorida (3,7 MB)
         </label>
+        <div className="row" style={{ marginTop: 8, gap: 6, flexWrap: "wrap" }}>
+          <span>Estilo</span>
+          <select value={style} onChange={(e) => setStyle(e.target.value as "realista" | "chapado")}>
+            <option value="realista">Realista (textura LiDAR)</option>
+            <option value="chapado">Chapado (cores planas)</option>
+          </select>
+          <button className="chip" onClick={presetPixelCity}>Maquete pixel</button>
+        </div>
         <details className="group" open>
           <summary>Modo pixel</summary>
           <label className="row">
